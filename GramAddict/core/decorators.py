@@ -30,34 +30,12 @@ def run_safely(device, device_id, sessions, session_state, screen_record, config
             try:
                 func(*args, **kwargs)
             except KeyboardInterrupt:
-                try:
-                    # Catch Ctrl-C and ask if user wants to pause execution
-                    logger.info(
-                        "CTRL-C detected . . .",
-                        extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
-                    )
-                    logger.info(
-                        f"-------- PAUSED: {datetime.now().strftime('%H:%M:%S')} --------",
-                        extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
-                    )
-                    logger.info(
-                        "NOTE: This is a rudimentary pause. It will restart the action, while retaining session data.",
-                        extra={"color": Style.BRIGHT},
-                    )
-                    logger.info(
-                        "Press RETURN to resume or CTRL-C again to Quit: ",
-                        extra={"color": Style.BRIGHT},
-                    )
-
-                    input("")
-
-                    logger.info(
-                        f"-------- RESUMING: {datetime.now().strftime('%H:%M:%S')} --------",
-                        extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
-                    )
-                    TabBarView(device).navigateToProfile()
-                except KeyboardInterrupt:
-                    stop_bot(device, sessions, session_state)
+                # Respect immediate exit on Ctrl-C
+                logger.info(
+                    "CTRL-C detected, stopping the bot.",
+                    extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
+                )
+                stop_bot(device, sessions, session_state)
 
             except DeviceFacade.AppHasCrashed:
                 logger.warning("App has crashed / has been closed!")

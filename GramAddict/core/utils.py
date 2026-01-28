@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,23 @@ def check_if_updated(crash=False):
         )
 
 
+def _resolve_adb_path() -> str:
+    env_adb = os.environ.get("ADB_PATH")
+    if env_adb:
+        p = Path(env_adb).expanduser()
+        if p.exists():
+            return str(p)
+    base_dir = Path(__file__).resolve().parent.parent
+    candidates = [
+        base_dir / "platform-tools" / "platform-tools" / "adb",
+        base_dir / "platform-tools" / "adb",
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return str(cand)
+    return "adb"
+
+
 def ask_for_a_donation():
     logger.info(
         "This bot is backed with love by me for free. If you like using it, consider donating to help keep me motivated: https://www.buymeacoffee.com/mastrolube",
@@ -148,10 +166,11 @@ def config_examples():
 
 def check_adb_connection():
     is_device_id_provided = configs.device_id is not None
+    adb = shlex.quote(_resolve_adb_path())
     # sometimes it needs two requests to wake up...
-    stream = os.popen("adb devices")
+    stream = os.popen(f"{adb} devices")
     stream.close()
-    stream = os.popen("adb devices")
+    stream = os.popen(f"{adb} devices")
     output = stream.read()
     devices_count = len(re.findall("device\n", output))
     stream.close()
@@ -174,8 +193,9 @@ def check_adb_connection():
 
 
 def get_instagram_version():
+    adb = shlex.quote(_resolve_adb_path())
     stream = os.popen(
-        f"adb{'' if configs.device_id is None else ' -s ' + configs.device_id} shell dumpsys package {app_id}"
+        f"{adb}{'' if configs.device_id is None else ' -s ' + configs.device_id} shell dumpsys package {app_id}"
     )
     output = stream.read()
     version_match = re.findall("versionName=(\\S+)", output)
@@ -186,7 +206,8 @@ def get_instagram_version():
 
 def open_instagram_with_url(url) -> bool:
     logger.info(f"Open Instagram app with url: {url}")
-    cmd = f"adb{'' if configs.device_id is None else ' -s ' + configs.device_id} shell am start -a android.intent.action.VIEW -d {url}"
+    adb = shlex.quote(_resolve_adb_path())
+    cmd = f"{adb}{'' if configs.device_id is None else ' -s ' + configs.device_id} shell am start -a android.intent.action.VIEW -d {url}"
     cmd_res = subprocess.run(cmd, stdout=PIPE, stderr=PIPE, shell=True, encoding="utf8")
     err = cmd_res.stderr.strip()
     random_sleep()

@@ -27,8 +27,12 @@ def check_if_english(device):
     elif post == "posts" and follower == "followers" and following == "following":
         logger.debug("Instagram in English.")
     else:
-        logger.error("Please change the language manually to English!")
-        sys.exit(1)
+        # Don't hard-exit; just warn so the session continues.
+        logger.error(
+            "Instagram seems not set to English (got: "
+            f"post='{post}', followers='{follower}', following='{following}'). "
+            "Please switch to English to avoid misclicks."
+        )
     return ProfileView(device, is_own_profile=True)
 
 
@@ -68,18 +72,9 @@ def nav_to_hashtag_or_place(device, target, current_job):
 
     TargetView = HashTagView if current_job.startswith("hashtag") else PlacesView
 
+    # Recent tab removed in new IG; stay on default "For you"/"Top" without switching.
     if current_job.endswith("recent"):
-        logger.info("Switching to Recent tab.")
-        recent_tab = TargetView(device)._getRecentTab()
-        if recent_tab.exists(Timeout.MEDIUM):
-            recent_tab.click()
-        else:
-            return False
-
-        if UniversalActions(device)._check_if_no_posts():
-            UniversalActions(device)._reload_page()
-            if UniversalActions(device)._check_if_no_posts():
-                return False
+        logger.info("Recent tab deprecated; staying on default search tab.")
 
     result_view = TargetView(device)._getRecyclerView()
     FistImageInView = TargetView(device)._getFistImageView(result_view)
@@ -103,9 +98,10 @@ def nav_to_post_likers(device, username, my_username):
         if not search_view.navigate_to_target(username, "account"):
             return False
     profile_view = ProfileView(device)
+    profile_view.wait_profile_header_loaded()
     is_private = profile_view.isPrivateAccount()
     posts_count = profile_view.getPostsCount()
-    is_empty = posts_count == 0
+    is_empty = posts_count == 0 if posts_count is not None else False
     if is_private or is_empty:
         private_empty = "Private" if is_private else "Empty"
         logger.info(f"{private_empty} account.", extra={"color": f"{Fore.GREEN}"})

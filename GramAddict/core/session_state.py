@@ -113,26 +113,27 @@ class SessionState:
         """Returns True if limit reached - else False"""
         limit_type = SessionState.Limit.ALL if limit_type is None else limit_type
         # check limits
-        total_likes = self.totalLikes >= int(self.args.current_likes_limit)
-        total_followed = sum(self.totalFollowed.values()) >= int(
-            self.args.current_follow_limit
-        )
-        total_unfollowed = self.totalUnfollowed >= int(self.args.current_unfollow_limit)
-        total_comments = self.totalComments >= int(self.args.current_comments_limit)
-        total_pm = self.totalPm >= int(self.args.current_pm_limit)
-        total_watched = self.totalWatched >= int(self.args.current_watch_limit)
-        total_successful = sum(self.successfulInteractions.values()) >= int(
-            self.args.current_success_limit
-        )
-        total_interactions = sum(self.totalInteractions.values()) >= int(
-            self.args.current_total_limit
-        )
+        likes_limit = int(self.args.current_likes_limit)
+        follow_limit = int(self.args.current_follow_limit)
+        unfollow_limit = int(self.args.current_unfollow_limit)
+        comments_limit = int(self.args.current_comments_limit)
+        pm_limit = int(self.args.current_pm_limit)
+        watch_limit = int(self.args.current_watch_limit)
+        success_limit = int(self.args.current_success_limit)
+        total_limit = int(self.args.current_total_limit)
+        scraped_limit = int(self.args.current_scraped_limit)
+        crashes_limit = int(self.args.current_crashes_limit)
 
-        total_scraped = sum(self.totalScraped.values()) >= int(
-            self.args.current_scraped_limit
-        )
-
-        total_crashes = self.totalCrashes >= int(self.args.current_crashes_limit)
+        total_likes = likes_limit > 0 and self.totalLikes >= likes_limit
+        total_followed = follow_limit > 0 and sum(self.totalFollowed.values()) >= follow_limit
+        total_unfollowed = unfollow_limit > 0 and self.totalUnfollowed >= unfollow_limit
+        total_comments = comments_limit > 0 and self.totalComments >= comments_limit
+        total_pm = pm_limit > 0 and self.totalPm >= pm_limit
+        total_watched = watch_limit > 0 and self.totalWatched >= watch_limit
+        total_successful = success_limit > 0 and sum(self.successfulInteractions.values()) >= success_limit
+        total_interactions = total_limit > 0 and sum(self.totalInteractions.values()) >= total_limit
+        total_scraped = scraped_limit > 0 and sum(self.totalScraped.values()) >= scraped_limit
+        total_crashes = crashes_limit > 0 and self.totalCrashes >= crashes_limit
 
         session_info = [
             "Checking session limits:",

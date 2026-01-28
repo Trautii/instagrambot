@@ -511,6 +511,11 @@ def handle_posts(
     already_liked_count_limit = 20
     post_view_list = PostsViewList(device)
     opened_post_view = OpenedPostView(device)
+    like_ads_percentage = get_value(
+        self.args.like_ads_percentage,
+        "Chance to like ads: {}",
+        0,
+    )
     while True:
         (
             is_same_post,
@@ -522,6 +527,10 @@ def handle_posts(
         ) = post_view_list._check_if_last_post(post_description, current_job)
         has_likers, number_of_likers = post_view_list._find_likers_container()
         already_liked, _ = opened_post_view._is_post_liked()
+        if is_ad and not random_choice(like_ads_percentage):
+            logger.info("Ad detected; skipping like/interact.")
+            post_view_list.swipe_to_fit_posts(SwipeTo.NEXT_POST)
+            continue
         if not (is_ad or is_hashtag):
             if already_liked_count == already_liked_count_limit:
                 logger.info(
@@ -674,7 +683,7 @@ def handle_followers(
     if not nav_to_blogger(device, username, current_job):
         return
 
-    iterate_over_followers(
+    def iterate_over_followers(
         self,
         device,
         interaction,
@@ -685,27 +694,23 @@ def handle_followers(
         scroll_end_detector,
         session_state,
         current_job,
-        username,
-    )
-
-
-def iterate_over_followers(
-    self,
-    device,
-    interaction,
-    is_follow_limit_reached,
-    storage,
-    on_interaction,
-    is_myself,
-    scroll_end_detector,
-    session_state,
-    current_job,
-    target,
-):
-    device.find(
-        resourceId=self.ResourceID.FOLLOW_LIST_CONTAINER,
-        className=ClassName.LINEAR_LAYOUT,
-    ).wait(Timeout.LONG)
+        target,
+    ):
+        # Wait for followers list container or generic recycler to appear
+        list_waiters = [
+            dict(resourceId=self.ResourceID.FOLLOW_LIST_CONTAINER, className=ClassName.LINEAR_LAYOUT),
+            dict(resourceIdMatches=case_insensitive_re(self.ResourceID.USER_LIST_CONTAINER)),
+            dict(resourceId=self.ResourceID.RECYCLER_VIEW),
+        ]
+        found_list = False
+        for sel in list_waiters:
+            obj = device.find(**sel)
+            if obj.exists(Timeout.LONG):
+                found_list = True
+                break
+        if not found_list:
+            logger.error("Followers list not found; skipping this blogger.")
+            return
 
     def scrolled_to_top():
         row_search = device.find(
@@ -864,3 +869,17 @@ def iterate_over_followers(
                 extra={"color": f"{Fore.GREEN}"},
             )
             return
+
+    iterate_over_followers(
+        self,
+        device,
+        interaction,
+        is_follow_limit_reached,
+        storage,
+        on_interaction,
+        is_myself,
+        scroll_end_detector,
+        session_state,
+        current_job,
+        username,
+    )

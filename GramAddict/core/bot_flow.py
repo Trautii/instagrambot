@@ -1,4 +1,5 @@
 import logging
+import warnings
 import random
 from datetime import datetime, timedelta
 from time import sleep
@@ -7,7 +8,7 @@ from colorama import Fore, Style
 
 from GramAddict import __tested_ig_version__
 from GramAddict.core.config import Config
-from GramAddict.core.device_facade import create_device, get_device_info
+from GramAddict.core.device_facade import Direction, create_device, get_device_info
 from GramAddict.core.filter import Filter
 from GramAddict.core.filter import load_config as load_filter
 from GramAddict.core.interaction import load_config as load_interaction
@@ -34,6 +35,8 @@ from GramAddict.core.utils import (
     get_value,
     head_up_notifications,
     kill_atx_agent,
+    random_choice,
+    random_choice,
 )
 from GramAddict.core.utils import load_config as load_utils
 from GramAddict.core.utils import (
@@ -53,6 +56,10 @@ from GramAddict.core.views import load_config as load_views
 
 
 def start_bot(**kwargs):
+    # Silence noisy third-party warnings (cached_property asyncio.iscoroutinefunction)
+    warnings.filterwarnings(
+        "ignore", category=DeprecationWarning, message=".*asyncio.iscoroutinefunction.*"
+    )
     # Logging initialization
     logger = logging.getLogger(__name__)
 
@@ -180,6 +187,24 @@ def start_bot(**kwargs):
         account_view = AccountView(device)
         tab_bar_view = TabBarView(device)
         try:
+            # Randomly decide whether to peek at notifications first (from home)
+            notif_pct = get_value(
+                configs.args.notifications_percentage, None, 50
+            )
+            if notif_pct and random_choice(int(notif_pct)):
+                logger.info("Opening notifications tab before refreshing profile.")
+                tab_bar_view.navigateToActivity()
+                sleep(random.uniform(0.8, 1.2))
+                logger.debug("Pull-to-refresh notifications.")
+                UniversalActions(device)._swipe_points(
+                    Direction.DOWN, start_point_y=400, delta_y=650
+                )
+                sleep(random.uniform(0.8, 1.6))
+                logger.debug("Exit notifications via back to restore tab bar.")
+                device.back()
+                sleep(random.uniform(0.5, 1.0))
+                tab_bar_view.navigateToHome()
+
             account_view.navigate_to_main_account()
             check_if_english(device)
             if configs.args.username is not None:
@@ -202,6 +227,15 @@ def start_bot(**kwargs):
             logger.error(f"Exception: {e}")
             save_crash(device)
             break
+
+        if (
+            session_state.my_username is None
+            and configs.args.username is not None
+        ):
+            logger.warning(
+                "Username not detected from UI; falling back to config username."
+            )
+            session_state.my_username = configs.args.username
 
         if (
             session_state.my_username is None

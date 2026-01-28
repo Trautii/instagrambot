@@ -143,6 +143,8 @@ class TabBarView:
                 classNameMatches=ClassName.BUTTON_OR_FRAME_LAYOUT_REGEX,
                 descriptionMatches=case_insensitive_re(TabBarText.HOME_CONTENT_DESC),
             )
+            if not button.exists():
+                button = self.device.find(resourceId=ResourceID.FEED_TAB)
 
         elif tab == TabBarTabs.SEARCH:
             button = self.device.find(
@@ -152,10 +154,13 @@ class TabBarView:
 
             if not button.exists():
                 # Some accounts display the search btn only in Home -> action bar
-                logger.debug("Didn't find search in the tab bar...")
-                home_view = self.navigateToHome()
-                home_view.navigateToSearch()
-                return
+                logger.debug("Didn't find search in the tab bar, try resource id...")
+                button = self.device.find(resourceId=ResourceID.SEARCH_TAB)
+                if not button.exists():
+                    logger.debug("Still no search tab, try Home action bar fallback.")
+                    home_view = self.navigateToHome()
+                    home_view.navigateToSearch()
+                    return
         elif tab == TabBarTabs.REELS:
             button = self.device.find(
                 classNameMatches=ClassName.BUTTON_OR_FRAME_LAYOUT_REGEX,
@@ -169,12 +174,26 @@ class TabBarView:
             )
 
         elif tab == TabBarTabs.ACTIVITY:
-            button = self.device.find(
-                classNameMatches=ClassName.BUTTON_OR_FRAME_LAYOUT_REGEX,
-                descriptionMatches=case_insensitive_re(
-                    TabBarText.ACTIVITY_CONTENT_DESC
-                ),
-            )
+            # IG 410 home has the heart/notifications as a top action-bar button
+            button = self.device.find(resourceId=ResourceID.ACTION_BAR_NOTIFICATION)
+            if not button.exists():
+                # Ensure we are on Home so the action bar is visible
+                home_tab = self.device.find(resourceId=ResourceID.FEED_TAB)
+                if home_tab.exists():
+                    home_tab.click(sleep=SleepTime.SHORT)
+                    random_sleep(0.2, 0.6, modulable=False)
+                    button = self.device.find(resourceId=ResourceID.ACTION_BAR_NOTIFICATION)
+            if not button.exists():
+                button = self.device.find(
+                    resourceIdMatches=ResourceID.TAB_BAR_ACTIVITY,
+                )
+            if not button.exists():
+                button = self.device.find(
+                    classNameMatches=ClassName.BUTTON_OR_FRAME_LAYOUT_REGEX,
+                    descriptionMatches=case_insensitive_re(
+                        TabBarText.ACTIVITY_CONTENT_DESC
+                    ),
+                )
 
         elif tab == TabBarTabs.PROFILE:
             button = self.device.find(
@@ -184,10 +203,21 @@ class TabBarView:
             if not button.exists():
                 button = self._get_new_profile_position()
 
+        # If still not found, try to restore tab bar by pressing back once
+        if (button is None or not button.exists(Timeout.SHORT)) and not self.device.find(
+            resourceIdMatches=ResourceID.TAB_BAR
+        ).exists(Timeout.SHORT):
+            self.device.back()
+            random_sleep(0.3, 0.8, modulable=False)
+            if tab == TabBarTabs.SEARCH:
+                button = self.device.find(resourceId=ResourceID.SEARCH_TAB)
+            elif tab == TabBarTabs.HOME:
+                button = self.device.find(resourceId=ResourceID.FEED_TAB)
+
         if button is not None and button.exists(Timeout.MEDIUM):
             # Two clicks to reset tab content
             button.click(sleep=SleepTime.SHORT)
-            if tab is not TabBarTabs.PROFILE:
+            if tab not in (TabBarTabs.PROFILE, TabBarTabs.ACTIVITY):
                 button.click(sleep=SleepTime.SHORT)
             return
 
@@ -216,9 +246,30 @@ class HomeView(ActionBarView):
         search_btn = self.action_bar.child(
             descriptionMatches=case_insensitive_re(TabBarText.SEARCH_CONTENT_DESC)
         )
-        search_btn.click()
+        if search_btn.exists():
+            search_btn.click()
+            self._maybe_refresh_search()
+            return
+        # Fallback to search tab button
+        tab_button = self.device.find(resourceId=ResourceID.SEARCH_TAB)
+        if tab_button.exists(Timeout.SHORT):
+            tab_button.click()
+            self._maybe_refresh_search()
+        else:
+            logger.error("Search button not found in action bar or tab bar.")
 
         return SearchView(self.device)
+
+    def _maybe_refresh_search(self):
+        from random import randint
+
+        # 20-30% chance to do a light pull-to-refresh in search for human-like behavior
+        if randint(1, 100) <= randint(20, 30):
+            logger.debug("Random search refresh (human-like).")
+            UniversalActions(self.device)._swipe_points(
+                direction=Direction.DOWN, start_point_y=350, delta_y=350
+            )
+            random_sleep(0.6, 1.2, modulable=False)
 
 
 class HashTagView:
@@ -244,15 +295,22 @@ class HashTagView:
         return obj
 
     def _getRecentTab(self):
-        obj = self.device.find(
-            className=ClassName.TEXT_VIEW,
-            textMatches=case_insensitive_re(TabBarText.RECENT_CONTENT_DESC),
-        )
-        if obj.exists(Timeout.LONG):
-            logger.debug("Recent Tab exists.")
-        else:
-            logger.debug("Recent Tab doesn't exists.")
-        return obj
+        # Recent tab was removed in newer IG; fall back to "For you"/"Top"
+        candidates = [
+            TabBarText.RECENT_CONTENT_DESC,
+            "For you",
+            "Top",
+        ]
+        for title in candidates:
+            obj = self.device.find(
+                className=ClassName.TEXT_VIEW,
+                textMatches=case_insensitive_re(title),
+            )
+            if obj.exists(Timeout.SHORT):
+                logger.debug(f"{title} tab exists.")
+                return obj
+        logger.debug("Recent/For you tab doesn't exist.")
+        return self.device.find(className=ClassName.TEXT_VIEW, text="")  # dummy
 
 
 # The place view for the moment It's only a copy/paste of HashTagView
@@ -282,10 +340,19 @@ class PlacesView:
         return obj
 
     def _getRecentTab(self):
-        return self.device.find(
-            className=ClassName.TEXT_VIEW,
-            textMatches=case_insensitive_re(TabBarText.RECENT_CONTENT_DESC),
-        )
+        candidates = [
+            TabBarText.RECENT_CONTENT_DESC,
+            "For you",
+            "Top",
+        ]
+        for title in candidates:
+            obj = self.device.find(
+                className=ClassName.TEXT_VIEW,
+                textMatches=case_insensitive_re(title),
+            )
+            if obj.exists(Timeout.SHORT):
+                return obj
+        return self.device.find(className=ClassName.TEXT_VIEW, text="")
 
     def _getInformBody(self):
         return self.device.find(
@@ -340,24 +407,23 @@ class SearchView:
         return obj
 
     def _getTabTextView(self, tab: SearchTabs):
-        tab_layout = self.device.find(
-            resourceIdMatches=case_insensitive_re(
-                ResourceID.FIXED_TABBAR_TABS_CONTAINER
-            ),
-        )
+        # New search results tabs use plain Buttons with text ("For you", "Accounts", "Not personalized")
+        tab_text = {
+            SearchTabs.TOP: "For you",
+            SearchTabs.ACCOUNTS: "Accounts",
+            SearchTabs.TAGS: "Tags",
+            SearchTabs.PLACES: "Places",
+        }.get(tab, tab.name)
+        # Try container-specific search first
+        tab_layout = self.device.find(resourceIdMatches=case_insensitive_re(ResourceID.SEARCH_TAB_BAR_LAYOUT))
         if tab_layout.exists():
-            logger.debug("Tabs container exists!")
-            tab_text_view = tab_layout.child(
-                resourceIdMatches=case_insensitive_re(ResourceID.TAB_BUTTON_NAME_TEXT),
-                textMatches=case_insensitive_re(tab.name),
-            )
-            if not tab_text_view.exists():
-                logger.debug("Tabs container hasn't text! Let's try with description.")
-                for obj in tab_layout.child():
-                    if obj.ui_info()["contentDescription"].upper() == tab.name.upper():
-                        tab_text_view = obj
-                        break
-            return tab_text_view
+            candidate = tab_layout.child(textMatches=case_insensitive_re(tab_text))
+            if candidate.exists():
+                return candidate
+        # Fallback: global button lookup by text
+        candidate = self.device.find(className=ClassName.BUTTON, textMatches=case_insensitive_re(tab_text))
+        if candidate.exists():
+            return candidate
         return None
 
     def _searchTabWithTextPlaceholder(self, tab: SearchTabs):
@@ -444,14 +510,61 @@ class SearchView:
             else:
                 obj = self._getPlaceRow()
         else:
+            # Prefer explicit user row id, then fallback to visible text
             obj = self.device.find(
-                text=target,
-                resourceIdMatches=ResourceID.SEARCH_ROW_ITEM,
+                resourceIdMatches=case_insensitive_re(ResourceID.ROW_SEARCH_USER_USERNAME),
+                textMatches=case_insensitive_re(target),
             )
+            if not obj.exists():
+                obj = self.device.find(textMatches=case_insensitive_re(target))
         if obj.exists():
             obj.click()
+            # Wait for profile page to load when opening accounts
+            if "hashtag" not in job and "place" not in job:
+                header = self.device.find(
+                    resourceIdMatches=case_insensitive_re(
+                        f"{ResourceID.ROW_PROFILE_HEADER_IMAGEVIEW}|{ResourceID.PROFILE_HEADER_AVATAR_CONTAINER_TOP_LEFT_STUB}"
+                    )
+                )
+                header.exists(Timeout.LONG)
+            # If we landed on a reel from search grid, optionally watch/like before returning
+            self._handle_search_reel_autoplay_if_reel()
             return True
         return False
+
+    def _handle_search_reel_autoplay_if_reel(self):
+        autoplay_count = get_value(args.search_reel_autoplay_count, None, 0)
+        if not autoplay_count:
+            return
+        # Detect reel viewer presence
+        reel_view = self.device.find(
+            resourceIdMatches=case_insensitive_re(ResourceID.REEL_VIEWER_MEDIA_CONTAINER)
+        )
+        if not reel_view.exists(Timeout.SHORT):
+            reel_view = self.device.find(
+                resourceIdMatches=case_insensitive_re(ResourceID.CLIPS_VIDEO_CONTAINER)
+            )
+        if not reel_view.exists(Timeout.SHORT):
+            return
+
+        like_pct = get_value(args.search_reel_like_percentage, None, 0)
+        logger.info(f"Watching up to {autoplay_count} reels opened from search.")
+        for _ in range(autoplay_count):
+            if like_pct and randint(1, 100) <= like_pct:
+                like_btn = self.device.find(
+                    resourceIdMatches=case_insensitive_re(ResourceID.LIKE_BUTTON)
+                )
+                if not like_btn.exists():
+                    like_btn = self.device.find(
+                        descriptionMatches=case_insensitive_re("like")
+                    )
+                if like_btn.exists(Timeout.SHORT):
+                    like_btn.click()
+                    UniversalActions.detect_block(self.device)
+            random_sleep(inf=2, sup=4, modulable=False)
+            UniversalActions(self.device)._swipe_points(direction=Direction.UP, delta_y=800)
+        logger.info("Returning from search reels.")
+        self.device.back()
 
 
 class PostsViewList:
@@ -469,9 +582,11 @@ class PostsViewList:
 
         # move type: half photo
         if swipe == SwipeTo.HALF_PHOTO:
-            zoomable_view_container = self.device.find(
-                resourceIdMatches=containers_content
-            ).get_bounds()["bottom"]
+            media = self.device.find(resourceIdMatches=containers_content)
+            if not media.exists(Timeout.SHORT):
+                logger.info("Media container not found; skipping current post.")
+                return
+            zoomable_view_container = media.get_bounds()["bottom"]
             ac_exists, _, ac_bottom = PostsViewList(
                 self.device
             )._get_action_bar_position()
@@ -500,6 +615,9 @@ class PostsViewList:
                         break
                 else:
                     media = self.device.find(resourceIdMatches=containers_content)
+                    if not media.exists(Timeout.SHORT):
+                        logger.info("Media container missing; skip to next post.")
+                        return
                     if (
                         gap_view_obj.get_bounds()["bottom"]
                         < media.get_bounds()["bottom"]
@@ -702,7 +820,21 @@ class PostsViewList:
             current_job, Owner.GET_NAME
         )
         has_tags = self._has_tags()
+        # Avoid getting stuck if a Reel opens in full-screen
+        reel_retry = 0
         while True:
+            if (
+                self.device.find(resourceId=ResourceID.REEL_VIEWER_MEDIA_CONTAINER).exists(
+                    Timeout.TINY
+                )
+                and reel_retry < 2
+            ):
+                logger.info("Reel opened instead of a post, backing out.")
+                self.device.back()
+                random_sleep(1, 2, modulable=False)
+                reel_retry += 1
+                continue
+
             post_description = self.device.find(
                 index=-1,
                 resourceIdMatches=ResourceID.ROW_FEED_TEXT,
@@ -754,6 +886,10 @@ class PostsViewList:
                     f"Can't find the description of {username}'s post, try to swipe a little bit down."
                 )
                 universal_actions._swipe_points(direction=Direction.DOWN, delta_y=200)
+                reel_retry += 1
+                if reel_retry >= 5:
+                    logger.info("Skip post after repeated missing description.")
+                    return False, "", username, is_ad, is_hashtag, has_tags
 
     def _if_action_bar_is_over_obj_swipe(self, obj):
         """do a swipe of the amount of the action bar"""
@@ -785,9 +921,9 @@ class PostsViewList:
         refresh_pill = self.device.find(resourceId=ResourceID.NEW_FEED_PILL)
         if refresh_pill.exists(Timeout.SHORT):
             refresh_pill.click()
-            random_sleep(inf=5, sup=8, modulable=False)
         else:
-            UniversalActions(self.device)._reload_page()
+            logger.debug("Skip pull-to-refresh; no new feed pill.")
+        random_sleep(inf=0.5, sup=1.5, modulable=False)
 
     def _post_owner(self, current_job, mode: Owner, username=None):
         """returns a tuple[var, bool, bool]"""
@@ -1012,14 +1148,49 @@ class PostsViewList:
         if owner_name.startswith("#"):
             is_hashtag = True
             logger.debug("Looks like an hashtag, skip.")
+        # Detect ads via adjacent label, dedicated ad badge, or global Sponsored markers
+        sponsored_txts = [
+            "sponsored",
+            "gesponsert",
+            "pubblicité",
+            "publicidad",
+            "sponsorisé",
+            "advertisement",
+            "ad",
+        ]
+        # IG embeds a dedicated ad root; detect it early
+        ad_root = self.device.find(
+            resourceIdMatches=ResourceID.SPONSORED_CONTENT_SERVER_RENDERED_ROOT
+        )
+        if ad_root.exists(Timeout.TINY):
+            logger.debug("Sponsored root detected, mark as AD.")
+            is_ad = True
+        if not is_ad:
+            ad_badge = post_owner_obj.sibling(resourceId=ResourceID.AD_BADGE)
+            if ad_badge.exists(Timeout.TINY):
+                logger.debug("Ad badge under username detected, mark as AD.")
+                is_ad = True
         if ad_like_obj.exists():
-            sponsored_txt = "Sponsored"
-            ad_like_txt = ad_like_obj.get_text() or ad_like_obj.get_desc()
-            if ad_like_txt.casefold() == sponsored_txt.casefold():
+            ad_like_txt = (ad_like_obj.get_text() or ad_like_obj.get_desc() or "").strip()
+            if ad_like_txt.lower() in sponsored_txts:
                 logger.debug("Looks like an AD, skip.")
                 is_ad = True
-            elif is_hashtag:
-                owner_name = owner_name.split("•")[0].strip()
+        if not is_ad:
+            sponsored_anywhere = self.device.find(
+                textMatches=case_insensitive_re("|".join(sponsored_txts))
+            )
+            if sponsored_anywhere.exists(Timeout.TINY):
+                # ensure it belongs to current post by bounding box proximity
+                try:
+                    sponsor_bounds = sponsored_anywhere.get_bounds()
+                    owner_bounds = post_owner_obj.get_bounds()
+                    if sponsor_bounds["top"] < owner_bounds["bottom"] + 600:
+                        logger.debug("Sponsored label detected, mark as AD.")
+                        is_ad = True
+                except Exception:
+                    is_ad = True
+        if is_hashtag:
+            owner_name = owner_name.split("•")[0].strip()
 
         return is_ad, is_hashtag, owner_name
 
@@ -1088,8 +1259,9 @@ class AccountView:
         logger.debug("Navigating to main account...")
         profile_view = ProfileView(self.device)
         profile_view.click_on_avatar()
-        if profile_view.getFollowingCount() is None:
+        if not profile_view.wait_profile_header_loaded():
             profile_view.click_on_avatar()
+            profile_view.wait_profile_header_loaded()
 
     def changeToUsername(self, username: str):
         action_bar = ProfileView._getActionBarTitleBtn(self)
@@ -1136,24 +1308,34 @@ class AccountView:
         return False
 
     def refresh_account(self):
-        textview = self.device.find(
-            resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_POST_CONTAINER
-        )
+        selectors = [
+            dict(resourceIdMatches=ResourceID.PROFILE_HEADER_METRICS_FULL_WIDTH),
+            dict(resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_POST_CONTAINER),
+        ]
+        textview = None
+        for sel in selectors:
+            textview = self.device.find(**sel)
+            if textview.exists(Timeout.SHORT):
+                break
+
         universal_actions = UniversalActions(self.device)
-        if textview.exists(Timeout.SHORT):
+        if textview and textview.exists(Timeout.SHORT):
             logger.info("Refresh account...")
             universal_actions._swipe_points(
-                direction=Direction.UP,
+                direction=Direction.DOWN,
                 start_point_y=textview.get_bounds()["bottom"],
                 delta_y=280,
             )
             random_sleep(modulable=False)
-        obj = self.device.find(
-            resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_POST_CONTAINER
-        )
-        if not obj.exists(Timeout.MEDIUM):
+        # Ensure header still visible; fallback scroll if not
+        header_visible = False
+        for sel in selectors:
+            if self.device.find(**sel).exists(Timeout.SHORT):
+                header_visible = True
+                break
+        if not header_visible:
             logger.debug(
-                "Can't see Posts, Followers and Following after the refresh, maybe we moved a little bit bottom.. Swipe down."
+                "Can't see Posts/Followers/Following after refresh, nudging view to reveal header."
             )
             universal_actions._swipe_points(Direction.UP)
 
@@ -1256,6 +1438,85 @@ class OpenedPostView:
                     logger.info("Double click failed, clicking on the little heart ❤️.")
                     like_button.click()
                     liked, _ = self._is_post_liked()
+        return liked
+
+    def like_comments(
+        self, probability: int, max_likes: int, sort_preference: Optional[str] = None
+    ) -> int:
+        """
+        Open the comment sheet, optionally change sort, and like a few comments.
+        """
+        if probability <= 0 or max_likes <= 0:
+            return 0
+        logger.info("Opening comments to like.")
+        comment_button = self.device.find(
+            resourceIdMatches=ResourceID.ROW_FEED_BUTTON_COMMENT
+        )
+        if not comment_button.exists():
+            comment_button = self.device.find(
+                descriptionMatches=case_insensitive_re("comment")
+            )
+        if not comment_button.exists():
+            logger.warning("Cannot find comment button.")
+            return 0
+        comment_button.click()
+        UniversalActions.detect_block(self.device)
+        random_sleep(inf=1, sup=2, modulable=False)
+
+        if sort_preference:
+            sort_button = self.device.find(
+                textMatches=case_insensitive_re(
+                    ["For you", "Top", "Newest", "Most relevant", "Following"]
+                )
+            )
+            if sort_button.exists(Timeout.SHORT):
+                current_label = sort_button.get_text()
+                if current_label and sort_preference.lower() not in current_label.lower():
+                    sort_button.click()
+                    option = self.device.find(
+                        textMatches=case_insensitive_re(sort_preference)
+                    )
+                    if option.exists(Timeout.SHORT):
+                        option.click()
+                        random_sleep(inf=1, sup=2, modulable=False)
+
+        liked = 0
+        attempts = 0
+        comment_list = self.device.find(resourceIdMatches=ResourceID.RECYCLER_VIEW)
+        like_desc_regex = case_insensitive_re(["tap to like comment", "like comment"])
+        while liked < max_likes and attempts < 5:
+            like_selector = self.device.find(descriptionMatches=like_desc_regex)
+            count = like_selector.count_items()
+            for idx in range(count):
+                like_btn = self.device.find(
+                    index=idx, descriptionMatches=like_desc_regex
+                )
+                if not like_btn.exists():
+                    continue
+                try:
+                    if like_btn.get_property("selected"):
+                        continue
+                except Exception:
+                    pass
+                if randint(1, 100) > probability:
+                    continue
+                like_btn.click()
+                UniversalActions.detect_block(self.device)
+                liked += 1
+                random_sleep(inf=1, sup=2, modulable=False)
+                if liked >= max_likes:
+                    break
+            if liked >= max_likes:
+                break
+            if comment_list.exists():
+                comment_list.scroll(Direction.DOWN)
+            else:
+                UniversalActions(self.device)._swipe_points(
+                    direction=Direction.UP, delta_y=600
+                )
+            attempts += 1
+            random_sleep(inf=1, sup=2, modulable=False)
+        self.device.back()
         return liked
 
     def start_video(self) -> bool:
@@ -1490,48 +1751,84 @@ class ProfileView(ActionBarView):
         )
         if not watching_stories and action_bar.exists(Timeout.LONG) or watching_stories:
             return action_bar
+        # Fallback: look for profile header username/full name when action bar is missing
+        header_name = self.device.find(
+            resourceIdMatches=case_insensitive_re(
+                f"{ResourceID.PROFILE_HEADER_FULL_NAME}|{ResourceID.USERNAME_TEXTVIEW}"
+            )
+        )
+        if header_name.exists(Timeout.MEDIUM):
+            return header_name
+        # Last resort: try tab bar profile badge
+        tab_badge = self.device.find(resourceIdMatches=ResourceID.TAB_AVATAR)
+        if tab_badge.exists(Timeout.SHORT):
+            tab_badge.click()
+            random_sleep(0.5, 1.0, modulable=False)
+            return self.device.find(resourceIdMatches=bar)
         logger.error(
-            "Unable to find action bar! (The element with the username at top)"
+            "Unable to find action bar or header username! (The element with the username at top)"
         )
         return None
 
     def _getSomeText(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """Get some text from the profile to check the language"""
-        obj = self.device.find(
-            resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_POST_CONTAINER
-        )
-        if not obj.exists(Timeout.MEDIUM):
-            UniversalActions(self.device)._swipe_points(Direction.UP)
-        try:
-            post = (
-                self.device.find(
-                    resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_POST_CONTAINER
-                )
-                .child(index=1)
-                .get_text()
-            )
-            followers = (
-                self.device.find(
-                    resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_FOLLOWERS_CONTAINER
-                )
-                .child(index=1)
-                .get_text()
-            )
-            following = (
-                self.device.find(
-                    resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_FOLLOWING_CONTAINER
-                )
-                .child(index=1)
-                .get_text()
-            )
-            return post.casefold(), followers.casefold(), following.casefold()
-        except Exception as e:
-            logger.debug(f"Exception: {e}")
+        """Get label strings from profile header for language check."""
+        label_selectors = {
+            "post": [
+                dict(resourceIdMatches=ResourceID.PROFILE_HEADER_FAMILIAR_POST_COUNT_LABEL),
+            ],
+            "followers": [
+                dict(resourceIdMatches=ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWERS_LABEL),
+            ],
+            "following": [
+                dict(resourceIdMatches=ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWING_LABEL),
+            ],
+        }
+        # Legacy fallback: use count text if labels missing
+        count_selectors = {
+            "post": [
+                dict(resourceIdMatches=ResourceID.PROFILE_HEADER_FAMILIAR_POST_COUNT_VALUE),
+                dict(resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_POST_COUNT),
+            ],
+            "followers": [
+                dict(resourceIdMatches=ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWERS_VALUE),
+                dict(resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_FOLLOWERS_COUNT),
+            ],
+            "following": [
+                dict(resourceIdMatches=ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWING_VALUE),
+                dict(resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_FOLLOWING_COUNT),
+            ],
+        }
+
+        texts = {"post": None, "followers": None, "following": None}
+
+        # Try labels first
+        for key, options in label_selectors.items():
+            for sel in options:
+                view = self.device.find(**sel)
+                if view.exists(Timeout.MEDIUM):
+                    t = view.get_text()
+                    if t:
+                        texts[key] = t
+                        break
+
+        # Fallback to counts if any label missing
+        for key in texts:
+            if texts[key] is None:
+                for sel in count_selectors[key]:
+                    view = self.device.find(**sel)
+                    if view.exists(Timeout.MEDIUM):
+                        t = view.get_text()
+                        if t:
+                            texts[key] = t
+                            break
+
+        if any(v is None for v in texts.values()):
             logger.warning(
                 "Can't get post/followers/following text for check the language! Save a crash to understand the reason."
             )
             save_crash(self.device)
-            return None, None, None
+
+        return tuple(t.casefold() if t else None for t in texts.values())
 
     def _new_ui_profile_button(self) -> bool:
         found = False
@@ -1540,23 +1837,71 @@ class ProfileView(ActionBarView):
             if button.get_desc() == "Profile":
                 button.click()
                 found = True
+                break
         return found
 
     def _old_ui_profile_button(self) -> bool:
-        found = False
-        obj = self.device.find(resourceIdMatches=ResourceID.TAB_AVATAR)
-        if obj.exists(Timeout.MEDIUM):
-            obj.click()
-            found = True
-        return found
+        """Try the legacy bottom-tab avatar; fall back to tab content-desc.
+
+        On some IG builds/uiautomator2 combos, querying a missing selector raises
+        a JsonRpcError instead of returning an object with exists()==False. That
+        would previously crash the session before we could try other fallbacks."""
+        try:
+            obj = self.device.find(resourceIdMatches=ResourceID.TAB_AVATAR)
+            if obj.exists(Timeout.MEDIUM):
+                obj.click()
+                return True
+        except DeviceFacade.JsonRpcError as e:
+            logger.debug(f"tab_avatar selector failed: {e}")
+
+        # Newer UI exposes the profile tab with content-desc "Profile"
+        alt = self.device.find(
+            classNameMatches=ClassName.BUTTON_OR_FRAME_LAYOUT_REGEX,
+            descriptionMatches=case_insensitive_re(TabBarText.PROFILE_CONTENT_DESC),
+        )
+        if alt.exists(Timeout.MEDIUM):
+            alt.click()
+            return True
+
+        return False
 
     def click_on_avatar(self):
-        while True:
+        attempts = 0
+        while attempts < 5:
             if self._new_ui_profile_button():
-                break
+                return
             if self._old_ui_profile_button():
-                break
+                return
             self.device.back()
+            attempts += 1
+        logger.warning("Unable to find profile avatar from current screen, using tab bar fallback.")
+        TabBarView(self.device).navigateToProfile()
+
+    def wait_profile_header_loaded(self, retries: int = 3) -> bool:
+        """Wait until any known profile metric is visible before reading counts."""
+        selectors = [
+            dict(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWERS_VALUE
+                ),
+                className=ClassName.TEXT_VIEW,
+            ),
+            dict(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_FOLLOWERS_COUNT
+                ),
+                className=ClassName.TEXT_VIEW,
+            ),
+        ]
+        for attempt in range(retries):
+            for sel in selectors:
+                view = self.device.find(**sel)
+                if view.exists(Timeout.LONG):
+                    return True
+            UniversalActions.close_keyboard(self.device)
+            random_sleep(1, 2, modulable=False)
+        logger.error("Profile header metrics not found after retries.")
+        return False
 
     def getFollowButton(self):
         button_regex = f"{ClassName.BUTTON}|{ClassName.TEXT_VIEW}"
@@ -1585,6 +1930,14 @@ class ProfileView(ActionBarView):
         action_bar = self._getActionBarTitleBtn(watching_stories)
         if action_bar is not None:
             return action_bar.get_text(error=not watching_stories).strip()
+        # Fallback to profile header username/full name
+        header_username = self.device.find(
+            resourceIdMatches=case_insensitive_re(
+                f"{ResourceID.PROFILE_HEADER_FULL_NAME}|{ResourceID.USERNAME_TEXTVIEW}"
+            )
+        )
+        if header_username.exists(Timeout.SHORT):
+            return header_username.get_text().strip()
         if not watching_stories:
             logger.error("Cannot get username.")
         return None
@@ -1643,14 +1996,28 @@ class ProfileView(ActionBarView):
         return int(value * multiplier)
 
     def _getFollowersTextView(self):
-        followers_text_view = self.device.find(
-            resourceIdMatches=case_insensitive_re(
-                ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_FOLLOWERS_COUNT
+        # Newer IG builds (410+) use *familiar* ids; older builds keep row_profile_header_*
+        selectors = [
+            dict(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWERS_VALUE
+                ),
+                className=ClassName.TEXT_VIEW,
             ),
-            className=ClassName.TEXT_VIEW,
-        )
-        followers_text_view.wait(Timeout.MEDIUM)
-        return followers_text_view
+            dict(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_FOLLOWERS_COUNT
+                ),
+                className=ClassName.TEXT_VIEW,
+            ),
+        ]
+        for sel in selectors:
+            view = self.device.find(**sel)
+            view.wait(Timeout.MEDIUM)
+            if view.exists():
+                return view
+        # return last tried to keep type stable
+        return view
 
     def getFollowersCount(self) -> Optional[int]:
         followers = None
@@ -1667,14 +2034,26 @@ class ProfileView(ActionBarView):
         return followers
 
     def _getFollowingTextView(self):
-        following_text_view = self.device.find(
-            resourceIdMatches=case_insensitive_re(
-                ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_FOLLOWING_COUNT
+        selectors = [
+            dict(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWING_VALUE
+                ),
+                className=ClassName.TEXT_VIEW,
             ),
-            className=ClassName.TEXT_VIEW,
-        )
-        following_text_view.wait(Timeout.MEDIUM)
-        return following_text_view
+            dict(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_FOLLOWING_COUNT
+                ),
+                className=ClassName.TEXT_VIEW,
+            ),
+        ]
+        for sel in selectors:
+            view = self.device.find(**sel)
+            view.wait(Timeout.MEDIUM)
+            if view.exists():
+                return view
+        return view
 
     def getFollowingCount(self) -> Optional[int]:
         following = None
@@ -1691,17 +2070,31 @@ class ProfileView(ActionBarView):
         return following
 
     def getPostsCount(self) -> int:
-        post_count_view = self.device.find(
-            resourceIdMatches=case_insensitive_re(
-                ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_POST_COUNT
-            )
-        )
-        if post_count_view.exists(Timeout.MEDIUM):
+        # Ensure header loaded
+        self.wait_profile_header_loaded()
+        selectors = [
+            dict(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.PROFILE_HEADER_FAMILIAR_POST_COUNT_VALUE
+                )
+            ),
+            dict(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_POST_COUNT
+                )
+            ),
+        ]
+        post_count_view = None
+        for sel in selectors:
+            post_count_view = self.device.find(**sel)
+            if post_count_view.exists(Timeout.MEDIUM):
+                break
+        if post_count_view.exists(Timeout.LONG):
             count = post_count_view.get_text()
             if count is not None:
                 return self._parseCounter(count)
         logger.error("Cannot get posts count text.")
-        return 0
+        return None
 
     def count_photo_in_view(self) -> Tuple[int, int]:
         """return rows filled and the number of post in the last row"""
@@ -1794,10 +2187,17 @@ class ProfileView(ActionBarView):
 
     def navigateToFollowers(self):
         logger.info("Navigate to followers.")
-        followers_button = self.device.find(
-            resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_FOLLOWERS_CONTAINER
-        )
-        if followers_button.exists(Timeout.LONG):
+        self._scroll_to_profile_header()
+        selectors = [
+            dict(resourceIdMatches=ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWERS_CONTAINER),
+            dict(resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_FOLLOWERS_CONTAINER),
+        ]
+        followers_button = None
+        for sel in selectors:
+            followers_button = self.device.find(**sel)
+            if followers_button.exists(Timeout.LONG):
+                break
+        if followers_button and followers_button.exists(Timeout.LONG):
             followers_button.click()
             followers_tab = self.device.find(
                 resourceIdMatches=ResourceID.UNIFIED_FOLLOW_LIST_TAB_LAYOUT
@@ -1812,10 +2212,17 @@ class ProfileView(ActionBarView):
 
     def navigateToFollowing(self):
         logger.info("Navigate to following.")
-        following_button = self.device.find(
-            resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_FOLLOWING_CONTAINER
-        )
-        if following_button.exists(Timeout.LONG):
+        self._scroll_to_profile_header()
+        selectors = [
+            dict(resourceIdMatches=ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWING_CONTAINER),
+            dict(resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_FOLLOWING_CONTAINER),
+        ]
+        following_button = None
+        for sel in selectors:
+            following_button = self.device.find(**sel)
+            if following_button.exists(Timeout.LONG):
+                break
+        if following_button and following_button.exists(Timeout.LONG):
             following_button.click_retry()
             following_tab = self.device.find(
                 resourceIdMatches=ResourceID.UNIFIED_FOLLOW_LIST_TAB_LAYOUT
@@ -1827,6 +2234,19 @@ class ProfileView(ActionBarView):
         else:
             logger.error("Can't find following tab!")
             return False
+
+    def _scroll_to_profile_header(self, attempts: int = 3):
+        """Ensure profile header (metrics row) is visible."""
+        metric_selectors = [
+            dict(resourceIdMatches=ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWERS_VALUE),
+            dict(resourceIdMatches=ResourceID.ROW_PROFILE_HEADER_TEXTVIEW_FOLLOWERS_COUNT),
+        ]
+        for _ in range(attempts):
+            for sel in metric_selectors:
+                if self.device.find(**sel).exists(Timeout.TINY):
+                    return
+            UniversalActions(self.device)._swipe_points(Direction.DOWN, delta_y=550)
+            random_sleep(0.3, 0.6, modulable=False)
 
     def navigateToMutual(self):
         logger.info("Navigate to mutual friends.")
@@ -2069,6 +2489,16 @@ class UniversalActions:
         if start_point_y == -1:
             start_point_y = displayHeight / 2
         if direction == Direction.UP:
+            if start_point_y - delta_y < 0:
+                delta = delta_y - start_point_y
+                start_point_y = start_point_y + delta
+            self.device.swipe_points(
+                middle_point_x,
+                start_point_y,
+                middle_point_x,
+                start_point_y - delta_y,
+            )
+        elif direction == Direction.DOWN:
             if start_point_y + delta_y > displayHeight:
                 delta = start_point_y + delta_y - displayHeight
                 start_point_y = start_point_y - delta
@@ -2077,16 +2507,6 @@ class UniversalActions:
                 start_point_y,
                 middle_point_x,
                 start_point_y + delta_y,
-            )
-        elif direction == Direction.DOWN:
-            if start_point_y - delta_y < 0:
-                delta = abs(start_point_y - delta_y)
-                start_point_y = start_point_y + delta
-            self.device.swipe_points(
-                middle_point_x,
-                start_point_y,
-                middle_point_x,
-                start_point_y - delta_y,
             )
         elif direction == Direction.LEFT:
             if start_point_x == -1:
@@ -2164,8 +2584,14 @@ class UniversalActions:
     def search_text(self, username):
         search_row = self.device.find(resourceId=ResourceID.ROW_SEARCH_EDIT_TEXT)
         if search_row.exists(Timeout.MEDIUM):
-            search_row.set_text(username, Mode.PASTE if args.dont_type else Mode.TYPE)
-            return True
+            # FastInputIME is flaky on newer Android; prefer paste for reliability.
+            for _ in range(2):
+                search_row.set_text(username, Mode.PASTE)
+                if search_row.get_text(error=False) == username:
+                    return True
+                random_sleep(0.3, 0.6, modulable=False)
+            logger.warning("Search bar text mismatch after retries.")
+            return False
         else:
             return False
 
