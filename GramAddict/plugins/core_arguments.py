@@ -67,6 +67,27 @@ class CoreArguments(Plugin):
                 "default": "50",
             },
             {
+                "arg": "--reels-likes-limit",
+                "nargs": None,
+                "help": "limit on reel likes per session (Reels tab + accidental reels), 0 disables",
+                "metavar": "0",
+                "default": "0",
+            },
+            {
+                "arg": "--reels-watches-limit",
+                "nargs": None,
+                "help": "limit on reels watched per session (Reels tab + accidental reels), 0 disables",
+                "metavar": "0",
+                "default": "0",
+            },
+            {
+                "arg": "--reels-like-doubletap-percentage",
+                "nargs": None,
+                "help": "chance to like a reel via double-tap instead of the heart icon (0-100). 0 = always icon, 100 = always double-tap",
+                "metavar": "50",
+                "default": "0",
+            },
+            {
                 "arg": "--total-successful-interactions-limit",
                 "nargs": None,
                 "help": "limit on total successful interactions per session, 100 by default",
@@ -317,20 +338,6 @@ class CoreArguments(Plugin):
                 "help": "optional sort applied in the comments sheet (e.g., Top, Newest, For you)",
                 "metavar": "Top",
                 "default": None,
-            },
-            {
-                "arg": "--search-reel-autoplay-count",
-                "nargs": None,
-                "help": "when a reel opens from search results, watch this many reels before backing out (number or range). 0 disables.",
-                "metavar": "1-3",
-                "default": "0",
-            },
-            {
-                "arg": "--search-reel-like-percentage",
-                "nargs": None,
-                "help": "chance of liking a reel opened from search results, 0 disables.",
-                "metavar": "10-40",
-                "default": "0",
             },
             {
                 "arg": "--end-if-likes-limit-reached",

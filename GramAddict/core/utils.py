@@ -48,40 +48,49 @@ def load_config(config: Config):
 
 
 def update_available():
-    response = requests.get("https://pypi.python.org/pypi/gramaddict/json")
-    if response.ok:
-        latest_version = response.json()["info"]["version"]
-
-        current_version = parse_version(__version__)
-        latest_version = parse_version(latest_version)
-
-        return current_version < latest_version, latest_version
-    else:
-        return False, None
+    # Disabled: remote version check no longer relevant for this fork.
+    # response = requests.get("https://pypi.python.org/pypi/gramaddict/json")
+    # if response.ok:
+    #     latest_version = response.json()["info"]["version"]
+    #
+    #     current_version = parse_version(__version__)
+    #     latest_version = parse_version(latest_version)
+    #
+    #     return current_version < latest_version, latest_version
+    # else:
+    #     return False, None
+    return False, None
 
 
 def check_if_updated(crash=False):
-    if not crash:
-        logger.info("Checking for updates...")
-    new_update, latest_version = update_available()
-    if new_update:
-        logger.warning("NEW VERSION FOUND!")
-        logger.warning(
-            f"Version {latest_version} has been released! Please update so that you can get all the latest features and bugfixes. Changelog here -> https://github.com/GramAddict/bot/blob/master/CHANGELOG.md"
-        )
-        logger.warning("HOW TO UPDATE:")
-        logger.warning("If you installed with pip: pip3 install GramAddict -U")
-        logger.warning("If you installed with git: git pull")
-        sleep(5)
-    elif latest_version is None:
-        logger.error("Unable to get latest version from pypi!")
-    elif not crash:
-        logger.info("Bot is updated.", extra={"color": f"{Style.BRIGHT}"})
-
+    # Disabled: update check relies on internet and upstream versioning.
+    # Original logic kept here for reference.
+    # if not crash:
+    #     logger.info("Checking for updates...")
+    # new_update, latest_version = update_available()
+    # if new_update:
+    #     logger.warning("NEW VERSION FOUND!")
+    #     logger.warning(
+    #         f"Version {latest_version} has been released! Please update so that you can get all the latest features and bugfixes. Changelog here -> https://github.com/GramAddict/bot/blob/master/CHANGELOG.md"
+    #     )
+    #     logger.warning("HOW TO UPDATE:")
+    #     logger.warning("If you installed with pip: pip3 install GramAddict -U")
+    #     logger.warning("If you installed with git: git pull")
+    #     sleep(5)
+    # elif latest_version is None:
+    #     logger.error("Unable to get latest version from pypi!")
+    # elif not crash:
+    #     logger.info("Bot is updated.", extra={"color": f"{Style.BRIGHT}"})
+    #
+    # if not crash:
+    #     logger.info(
+    #         f"GramAddict v.{__version__}",
+    #         extra={"color": f"{Style.BRIGHT}{Fore.MAGENTA}"},
+    #     )
     if not crash:
         logger.info(
-            f"GramAddict v.{__version__}",
-            extra={"color": f"{Style.BRIGHT}{Fore.MAGENTA}"},
+            "Update check skipped (forked offline build).",
+            extra={"color": f"{Style.BRIGHT}"},
         )
 
 

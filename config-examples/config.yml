@@ -50,6 +50,13 @@ interact-from-file: [usernames1.txt 10-15, usernames2.txt 3]
 posts-from-file: posts.txt
 feed: 2-5 # is the number of likes you will give in feed
 
+## Reels jobs (optional)
+#watch-reels: 5-10 # number of reels to watch (also used if a reel opens from search)
+#reels-like-percentage: 20 # chance (%) to like each reel
+#reels-watch-time: 6-9 # seconds to watch each reel before swiping
+#reels-like-ads: false # allow liking ads in reels; default false
+#reels-like-doubletap-percentage: 50 # % chance to like via double-tap instead of heart icon (0 = always icon, 100 = always double-tap)
+
 ## Special modifier for jobs and sources
 watch-video-time: 15-35
 watch-photo-time: 3-4
@@ -112,6 +119,8 @@ total-likes-limit: 120-150
 total-follows-limit: 40-50
 total-unfollows-limit: 40-50
 total-watches-limit: 120-150
+reels-likes-limit: 0 # per-session cap for reel likes (Reels tab + accidental reels). 0 disables; number or range (e.g., 5 or 5-10).
+reels-watches-limit: 0 # per-session cap for reels watched. 0 disables; number or range (e.g., 20 or 20-40).
 total-successful-interactions-limit: 120-150
 total-interactions-limit: 280-300
 total-comments-limit: 3-5

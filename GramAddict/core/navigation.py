@@ -82,6 +82,7 @@ def nav_to_hashtag_or_place(device, target, current_job):
         logger.info(f"Opening the first result for {target}.")
         FistImageInView.click()
         return True
+        return True
     else:
         logger.info(
             f"There is any result for {target} (not exists or doesn't load). Skip."

@@ -77,8 +77,8 @@ def start_bot(**kwargs):
     # Config-example hint
     config_examples()
 
-    # Check for updates
-    check_if_updated()
+    # Check for updates (disabled for forked/offline use)
+    # check_if_updated()
 
     # Move username folders to a main directory -> accounts
     if "--move-folders-in-accounts" in configs.args:
@@ -131,6 +131,7 @@ def start_bot(**kwargs):
             restart_atx_agent(device)
         get_device_info(device)
         session_state = SessionState(configs)
+        configs.session_state = session_state
         session_state.set_limits_session()
         sessions.append(session_state)
         check_screen_timeout()

@@ -23,6 +23,8 @@ class SessionState:
     totalComments = 0
     totalPm = 0
     totalWatched = 0
+    totalReelLikes = 0
+    totalReelWatched = 0
     totalUnfollowed = 0
     removedMassFollowers = []
     totalScraped = 0
@@ -44,6 +46,8 @@ class SessionState:
         self.totalComments = 0
         self.totalPm = 0
         self.totalWatched = 0
+        self.totalReelLikes = 0
+        self.totalReelWatched = 0
         self.totalUnfollowed = 0
         self.removedMassFollowers = []
         self.totalScraped = {}
@@ -96,6 +100,12 @@ class SessionState:
         self.args.current_watch_limit = get_value(
             self.args.total_watches_limit, None, 50
         )
+        self.args.current_reels_likes_limit = get_value(
+            self.args.reels_likes_limit, None, 0
+        )
+        self.args.current_reels_watches_limit = get_value(
+            self.args.reels_watches_limit, None, 0
+        )
         self.args.current_success_limit = get_value(
             self.args.total_successful_interactions_limit, None, 100
         )
@@ -119,6 +129,8 @@ class SessionState:
         comments_limit = int(self.args.current_comments_limit)
         pm_limit = int(self.args.current_pm_limit)
         watch_limit = int(self.args.current_watch_limit)
+        reels_likes_limit = int(self.args.current_reels_likes_limit)
+        reels_watches_limit = int(self.args.current_reels_watches_limit)
         success_limit = int(self.args.current_success_limit)
         total_limit = int(self.args.current_total_limit)
         scraped_limit = int(self.args.current_scraped_limit)
@@ -130,6 +142,12 @@ class SessionState:
         total_comments = comments_limit > 0 and self.totalComments >= comments_limit
         total_pm = pm_limit > 0 and self.totalPm >= pm_limit
         total_watched = watch_limit > 0 and self.totalWatched >= watch_limit
+        total_reel_likes = (
+            reels_likes_limit > 0 and self.totalReelLikes >= reels_likes_limit
+        )
+        total_reel_watched = (
+            reels_watches_limit > 0 and self.totalReelWatched >= reels_watches_limit
+        )
         total_successful = success_limit > 0 and sum(self.successfulInteractions.values()) >= success_limit
         total_interactions = total_limit > 0 and sum(self.totalInteractions.values()) >= total_limit
         total_scraped = scraped_limit > 0 and sum(self.totalScraped.values()) >= scraped_limit
@@ -147,14 +165,25 @@ class SessionState:
             f"- Total Interactions:\t\t\t{'Limit Reached' if total_interactions else 'OK'} ({sum(self.totalInteractions.values())}/{self.args.current_total_limit})",
             f"- Total Crashes:\t\t\t\t{'Limit Reached' if total_crashes else 'OK'} ({self.totalCrashes}/{self.args.current_crashes_limit})",
             f"- Total Successful Scraped Users:\t\t{'Limit Reached' if total_scraped else 'OK'} ({sum(self.totalScraped.values())}/{self.args.current_scraped_limit})",
+            f"- Reel Likes:\t\t\t\t{'Limit Reached' if total_reel_likes else 'OK'} ({self.totalReelLikes}/{self.args.current_reels_likes_limit})",
+            f"- Reel Watches:\t\t\t\t{'Limit Reached' if total_reel_watched else 'OK'} ({self.totalReelWatched}/{self.args.current_reels_watches_limit})",
         ]
+
+        # Throttle full log to once per minute to reduce noise
+        from time import time
+
+        if not hasattr(self, "_last_limits_log"):
+            self._last_limits_log = 0
+
+        should_log_full = time() - self._last_limits_log >= 60
 
         if limit_type == SessionState.Limit.ALL:
             if output is not None:
-                if output:
+                if output and should_log_full:
                     for line in session_info:
                         logger.info(line)
-                else:
+                    self._last_limits_log = time()
+                elif not output:
                     for line in session_info:
                         logger.debug(line)
 
@@ -311,6 +340,8 @@ class SessionStateEncoder(JSONEncoder):
             "total_comments": session_state.totalComments,
             "total_pm": session_state.totalPm,
             "total_watched": session_state.totalWatched,
+            "total_reel_likes": session_state.totalReelLikes,
+            "total_reel_watched": session_state.totalReelWatched,
             "total_unfollowed": session_state.totalUnfollowed,
             "total_scraped": session_state.totalScraped,
             "start_time": str(session_state.startTime),

@@ -24,5 +24,5 @@
 - PRs: include a short summary, tests run, linked issues, and logs/screenshots for UI changes.
 
 ## Feature Flags & Config Tips
-- Prefer config over CLI. Key toggles: `watch-reels`, `reels-like-percentage`, `reels-watch-time`; search reels via `search-reel-autoplay-count` and `search-reel-like-percentage`; startup randomness via `notifications-percentage`; comment likes via `like-comments-percentage`, `like-comments-per-post`, `comment-like-sort`; allow new IG builds with `allow-untested-ig-version: true`.
+- Prefer config over CLI. Key toggles: `watch-reels` (also used for search-opened reels), `reels-like-percentage`, `reels-watch-time`; startup randomness via `notifications-percentage`; comment likes via `like-comments-percentage`, `like-comments-per-post`, `comment-like-sort`; allow new IG builds with `allow-untested-ig-version: true`.
 - Prefer USB connections; specify devices by serial. Set `ADB_PATH` if using the bundled adb; Wi-Fi adb is only used when an explicit host:port is provided.

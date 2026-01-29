@@ -29,6 +29,19 @@ class ResourceID:
         self.CAROUSEL_INDEX_INDICATOR_TEXT_VIEW = (
             f"{APP_ID}:id/carousel_index_indicator_text_view"
         )
+        # Reels / Clips viewer
+        self.CLIPS_VIEWER_CONTAINER = f"{APP_ID}:id/clips_viewer_container"
+        self.CLIPS_VIEWER_VIEW_PAGER = f"{APP_ID}:id/clips_viewer_view_pager"
+        self.CLIPS_MEDIA_COMPONENT = f"{APP_ID}:id/clips_media_component"
+        self.CLIPS_ITEM_OVERLAY_COMPONENT = f"{APP_ID}:id/clips_item_overlay_component"
+        self.CLIPS_UFI_COMPONENT = f"{APP_ID}:id/clips_ufi_component"
+        self.CLIPS_AUTHOR_USERNAME = f"{APP_ID}:id/clips_author_username"
+        self.CLIPS_SWIPE_REFRESH_CONTAINER = f"{APP_ID}:id/clips_swipe_refresh_container"
+        self.CLIPS_LINEAR_LAYOUT_CONTAINER = (
+            f"{APP_ID}:id/clips_linear_layout_container"
+        )
+        self.CLIPS_ROOT_LAYOUT = f"{APP_ID}:id/root_clips_layout"
+        self.CLIPS_GESTURE_MANAGER = f"{APP_ID}:id/gesture_manager"
         self.CLIPS_VIDEO_CONTAINER = f"{APP_ID}:id/clips_video_container"
         self.COLLECTION_ROOT_VIEW = f"{APP_ID}:id/collection_root_view"
         self.COORDINATOR_ROOT_LAYOUT = f"{APP_ID}:id/coordinator_root_layout"
@@ -238,7 +251,7 @@ class ResourceID:
             f"{self.VIDEO_CONTAINER}|{self.CLIPS_VIDEO_CONTAINER}"
         )
         self.CAROUSEL_AND_MEDIA_GROUP = f"{self.CAROUSEL_IMAGE}|{self.MEDIA_GROUP}|{self.CAROUSEL_IMAGE_MEDIA_GROUP}|{self.CAROUSEL_VIDEO_MEDIA_GROUP}"
-        self.MEDIA_CONTAINER = f"{self.ZOOMABLE_VIEW_CONTAINER}|{self.CAROUSEL_MEDIA_GROUP}|{self.SPONSORED_CONTENT_SERVER_RENDERED_ROOT}|{self.COLLECTION_ROOT_VIEW}|{self.MEDIA_CONTENT_LOCATION}"
+        self.MEDIA_CONTAINER = f"{self.ZOOMABLE_VIEW_CONTAINER}|{self.CAROUSEL_MEDIA_GROUP}|{self.MEDIA_GROUP}|{self.SPONSORED_CONTENT_SERVER_RENDERED_ROOT}|{self.COLLECTION_ROOT_VIEW}|{self.MEDIA_CONTENT_LOCATION}"
         self.GAP_VIEW_AND_FOOTER_SPACE = f"{self.GAP_VIEW}|{self.FOOTER_SPACE}"
         self.BLOCK_POPUP = f"{self.DIALOG_CONTAINER}|{self.DIALOG_ROOT_VIEW}"
 
