@@ -106,6 +106,9 @@ class SessionState:
         self.args.current_reels_watches_limit = get_value(
             self.args.reels_watches_limit, None, 0
         )
+        self.args.current_reels_watch_after_like_limit = get_value(
+            self.args.reels_watch_after_like_limit, None, 1
+        )
         self.args.current_success_limit = get_value(
             self.args.total_successful_interactions_limit, None, 100
         )

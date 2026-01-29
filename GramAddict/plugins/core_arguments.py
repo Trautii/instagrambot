@@ -88,6 +88,13 @@ class CoreArguments(Plugin):
                 "default": "0",
             },
             {
+                "arg": "--reels-watch-after-like-limit",
+                "nargs": None,
+                "help": "when like limit is reached, watch this many more reels before exiting (number or range). 0 disables extra watch",
+                "metavar": "1-10",
+                "default": "1-10",
+            },
+            {
                 "arg": "--total-successful-interactions-limit",
                 "nargs": None,
                 "help": "limit on total successful interactions per session, 100 by default",
