@@ -8,7 +8,12 @@ from colorama import Fore, Style
 
 from GramAddict import __tested_ig_version__
 from GramAddict.core.config import Config
-from GramAddict.core.device_facade import Direction, create_device, get_device_info
+from GramAddict.core.device_facade import (
+    Direction,
+    create_device,
+    get_device_info,
+    load_config as load_device_facade,
+)
 from GramAddict.core.filter import Filter
 from GramAddict.core.filter import load_config as load_filter
 from GramAddict.core.interaction import load_config as load_interaction
@@ -86,6 +91,7 @@ def start_bot(**kwargs):
 
     # Global Variables
     sessions = PersistentList("sessions", SessionStateEncoder)
+    configs.sessions = sessions
 
     # Load Config
     configs.load_plugins()
@@ -97,6 +103,7 @@ def start_bot(**kwargs):
     load_interaction(configs)
     load_utils(configs)
     load_views(configs)
+    load_device_facade(configs)
 
     if not configs.args or not check_adb_connection():
         return
@@ -115,7 +122,7 @@ def start_bot(**kwargs):
 
     # init
     analytics_at_end = False
-    telegram_reports_at_end = False
+    telegram_reports_at_end = bool(configs.args.telegram_reports)
     followers_now = None
     following_now = None
 
@@ -279,14 +286,14 @@ def start_bot(**kwargs):
                 analytics_at_end = True
         if "telegram-reports" in jobs_list:
             jobs_list.remove("telegram-reports")
-            if configs.args.telegram_reports:
-                telegram_reports_at_end = True
         print_limits = True
         unfollow_jobs = [x for x in jobs_list if "unfollow" in x]
         logger.info(
             f"There is/are {len(jobs_list)-len(unfollow_jobs)} active-job(s) and {len(unfollow_jobs)} unfollow-job(s) scheduled for this session."
         )
         storage = Storage(session_state.my_username)
+        # Expose storage so view helpers can reference interacted users when needed
+        configs.storage = storage
         filters = Filter(storage)
         show_ending_conditions()
         if not configs.args.debug:
@@ -333,9 +340,11 @@ def start_bot(**kwargs):
                     f"Current unfollow-job: {plugin}",
                     extra={"color": f"{Style.BRIGHT}{Fore.BLUE}"},
                 )
+                session_state.start_job(plugin)
                 configs.actions[plugin].run(
                     device, configs, storage, sessions, filters, plugin
                 )
+                session_state.end_job()
                 unfollow_jobs.remove(plugin)
                 print_limits = True
             else:
@@ -361,9 +370,11 @@ def start_bot(**kwargs):
                     logger.warning(
                         "You're in scraping mode! That means you're only collection data without interacting!"
                     )
+                session_state.start_job(plugin)
                 configs.actions[plugin].run(
                     device, configs, storage, sessions, filters, plugin
                 )
+                session_state.end_job()
                 print_limits = True
 
         # save the session in sessions.json
@@ -421,6 +432,8 @@ def start_bot(**kwargs):
                     followers_now,
                     following_now,
                     time_left,
+                    session_state=session_state,
+                    sessions=sessions,
                 )
                 logger.info(
                     f'Next session will start at: {(datetime.now() + timedelta(seconds=time_left)).strftime("%H:%M:%S (%Y/%m/%d)")}.'
@@ -441,6 +454,8 @@ def start_bot(**kwargs):
                     followers_now,
                     following_now,
                     time_left.total_seconds(),
+                    session_state=session_state,
+                    sessions=sessions,
                 )
                 wait_for_next_session(
                     time_left,
@@ -455,6 +470,8 @@ def start_bot(**kwargs):
         telegram_reports_at_end,
         followers_now,
         following_now,
+        session_state=session_state,
+        sessions=sessions,
     )
     print_full_report(sessions, configs.args.scrape_to_file)
     ask_for_a_donation()

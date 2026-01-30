@@ -8,13 +8,59 @@ from random import randint, uniform
 from re import search
 from subprocess import PIPE, run
 from time import sleep, time
-from typing import Optional
+from typing import Optional, Tuple
 
 import uiautomator2
 
 from GramAddict.core.utils import random_sleep
 
 logger = logging.getLogger(__name__)
+
+DOUBLE_CLICK_INTERVAL_RANGE: Tuple[float, float] = (0.030, 0.090)
+
+
+def _parse_double_click_interval(value) -> Optional[Tuple[float, float]]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        val = float(value)
+        return (val, val)
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split("-") if part.strip()]
+        if len(parts) == 1:
+            try:
+                val = float(parts[0])
+            except ValueError:
+                return None
+            return (val, val)
+        if len(parts) == 2:
+            try:
+                low = float(parts[0])
+                high = float(parts[1])
+            except ValueError:
+                return None
+            if low > high:
+                low, high = high, low
+            return (low, high)
+    return None
+
+
+def load_config(config) -> None:
+    global DOUBLE_CLICK_INTERVAL_RANGE
+    args = getattr(config, "args", None)
+    if args is None:
+        return
+    interval_raw = getattr(args, "double_click_interval", None)
+    if interval_raw is None:
+        return
+    parsed = _parse_double_click_interval(interval_raw)
+    if parsed is None or parsed[0] <= 0 or parsed[1] <= 0:
+        logger.warning(
+            f"Invalid double-click-interval '{interval_raw}', using default "
+            f"{DOUBLE_CLICK_INTERVAL_RANGE[0]}-{DOUBLE_CLICK_INTERVAL_RANGE[1]}."
+        )
+        return
+    DOUBLE_CLICK_INTERVAL_RANGE = parsed
 
 
 def create_device(device_id, app_id):
@@ -575,7 +621,9 @@ class DeviceFacade:
                 )
             )
 
-            time_between_clicks = uniform(0.050, 0.140)
+            time_between_clicks = uniform(
+                DOUBLE_CLICK_INTERVAL_RANGE[0], DOUBLE_CLICK_INTERVAL_RANGE[1]
+            )
 
             try:
                 logger.debug(

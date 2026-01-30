@@ -14,8 +14,10 @@ from GramAddict.core.utils import (
     check_if_crash_popup_is_there,
     close_instagram,
     open_instagram,
+    print_telegram_reports,
     random_sleep,
     save_crash,
+    RandomStop,
     stop_bot,
 )
 from GramAddict.core.views import TabBarView
@@ -33,6 +35,13 @@ def run_safely(device, device_id, sessions, session_state, screen_record, config
                 # Respect immediate exit on Ctrl-C
                 logger.info(
                     "CTRL-C detected, stopping the bot.",
+                    extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
+                )
+                stop_bot(device, sessions, session_state)
+
+            except RandomStop:
+                logger.info(
+                    "Random stop triggered, stopping the bot.",
                     extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
                 )
                 stop_bot(device, sessions, session_state)
@@ -75,6 +84,15 @@ def run_safely(device, device_id, sessions, session_state, screen_record, config
                 close_instagram(device)
                 print_full_report(sessions, configs.args.scrape_to_file)
                 sessions.persist(directory=session_state.my_username)
+                if getattr(configs.args, "telegram_reports", False):
+                    print_telegram_reports(
+                        configs,
+                        True,
+                        None,
+                        None,
+                        session_state=session_state,
+                        sessions=sessions,
+                    )
                 raise e from e
 
         return wrapper
@@ -112,5 +130,14 @@ def restart(
     if not open_instagram(device):
         print_full_report(sessions, configs.args.scrape_to_file)
         sessions.persist(directory=session_state.my_username)
+        if getattr(configs.args, "telegram_reports", False):
+            print_telegram_reports(
+                configs,
+                True,
+                None,
+                None,
+                session_state=session_state,
+                sessions=sessions,
+            )
         sys.exit(2)
     TabBarView(device).navigateToProfile()

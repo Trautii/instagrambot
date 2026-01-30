@@ -15,6 +15,12 @@ allow-untested-ig-version: false          # set true to run on newer IG versions
 screen-sleep: true                        # turn screen off during idle periods
 screen-record: false                      # record screen for debugging (heavier)
 speed-multiplier: 1                       # <1 slower, >1 faster random sleeps
+grid-open-any: false                      # open any search grid tile without pre-filtering (reels/blacklist/interacted)
+fast-grid-open: true                      # open grid tiles via coordinates (faster, less safe); set disable-fast-grid-open: true to opt out
+disable-fast-grid-open: false             # disable fast grid opening and use object-based selection instead
+random-stop: 0                            # randomly hard-stop the session after N minutes (number or range); 0 disables
+home-tab-refresh-percentage: 0            # chance (0-100) to refresh Home by double-tapping the Home tab (0 disables)
+double-click-interval: 0.030-0.090        # seconds between taps for double-tap actions (likes). Lower if double-taps fail; higher if too sensitive
 debug: false                              # verbose logging
 close-apps: false                         # close other apps on start
 kill-atx-agent: false                     # stop atx-agent on exit
@@ -27,6 +33,8 @@ total-crashes-limit: 5                    # stop after N crashes in a session
 count-app-crashes: false                  # include IG crashes in crash limit
 shuffle-jobs: true                        # randomize job order
 truncate-sources: 2-5                     # cut long sources list to this size; 0 disables
+job-time-limit: 0                         # per-job time cap in minutes (number or range); 0 disables
+job-interactions-limit: 0                 # per-job successful interaction cap (number or range); 0 disables
 
 ##############################################################################
 # Actions (enable the jobs you want)
@@ -55,11 +63,13 @@ reels-watch-time: 6-9                                  # seconds to watch each r
 reels-like-ads: false                                  # allow likes on reels detected as ads
 reels-like-doubletap-percentage: 50                    # % chance to like via double-tap instead of heart icon (0 = always icon, 100 = always double-tap)
 reels-likes-limit: 0                                   # per-session cap for reel likes (Reels tab + accidental reels). 0 disables; number or range (e.g., 5 or 5-10).
-reels-watches-limit: 0                                 # per-session cap for reels watched. 0 disables; number or range (e.g., 20 or 20-40). When reached, reel watching stops but the session continues.
+reels-watches-limit: 0                                 # per-session cap for reels watched. 0 disables reel watching entirely; set 1+ (or a range) to enable.
+reels-watch-after-like-limit: 1-10                     # after likes limit is reached (global or reels), watch this many more reels then exit the reel viewer. 0 disables extra watch.
+single-image-reels-as-posts: false                     # treat single-image reels as photo posts (use post limits/timing)
 
 ## Special modifiers for jobs
 watch-video-time: 15-35                                # seconds to watch videos before interacting
-watch-photo-time: 3-4                                  # seconds to view photos before interacting
+watch-photo-time: 2-8                                  # seconds to view photos before interacting
 # can-reinteract-after: 48                              # hours before re-interacting with same user
 delete-interacted-users: true                          # remove interacted users from source lists
 

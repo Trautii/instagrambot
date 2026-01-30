@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import random
@@ -34,6 +35,10 @@ from GramAddict.core.storage import ACCOUNTS
 
 http = urllib3.PoolManager()
 logger = logging.getLogger(__name__)
+
+
+class RandomStop(Exception):
+    """Raised when the random-stop timer is reached."""
 
 
 def load_config(config: Config):
@@ -338,10 +343,29 @@ def open_instagram(device):
     return True
 
 
-def close_instagram(device):
+def close_instagram(device, force_kill: bool = True):
     logger.info("Close Instagram app.")
     device.deviceV2.app_stop(app_id)
-    random_sleep(5, 5, modulable=False)
+    random_sleep(2, 3, modulable=False)
+    if force_kill:
+        try:
+            running = device.deviceV2.app_list_running()
+        except Exception:
+            running = []
+        if app_id in running:
+            logger.warning("Instagram still running; force-stopping.")
+            device.deviceV2.app_stop(app_id)
+            random_sleep(1, 2, modulable=False)
+            try:
+                running = device.deviceV2.app_list_running()
+            except Exception:
+                running = []
+            if app_id in running:
+                try:
+                    device.deviceV2.shell(f"am force-stop {app_id}")
+                except Exception as e:
+                    logger.warning(f"Force-stop failed: {e}")
+    random_sleep(2, 3, modulable=False)
     if configs.args.screen_record:
         try:
             device.stop_screenrecord(crash=False)
@@ -446,13 +470,90 @@ def pre_post_script(path: str, pre: bool = True):
             )
 
 
-def print_telegram_reports(
-    conf, telegram_reports_at_end, followers_now, following_now, time_left=None
+def _load_last_profile_counts(username: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    if not username:
+        return None, None
+    path = os.path.join(ACCOUNTS, username, "sessions.json")
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        with open(path, encoding="utf-8") as json_file:
+            sessions = json.load(json_file)
+        if not sessions:
+            return None, None
+        last_session = sessions[-1]
+        profile = last_session.get("profile", {}) if isinstance(last_session, dict) else {}
+        return profile.get("followers"), profile.get("following")
+    except Exception as e:
+        logger.debug(f"Unable to load sessions.json for telegram report: {e}")
+        return None, None
+
+
+def _resolve_telegram_counts(
+    conf,
+    session_state=None,
+    sessions=None,
+    followers_now: Optional[int] = None,
+    following_now: Optional[int] = None,
 ):
-    if followers_now is not None and telegram_reports_at_end:
-        conf.actions["telegram-reports"].run(
-            conf, "telegram-reports", followers_now, following_now, time_left
+    if followers_now is None or following_now is None:
+        if session_state is not None:
+            if followers_now is None:
+                followers_now = session_state.my_followers_count
+            if following_now is None:
+                following_now = session_state.my_following_count
+    if (followers_now is None or following_now is None) and sessions:
+        last_session = sessions[-1]
+        if hasattr(last_session, "my_followers_count"):
+            if followers_now is None:
+                followers_now = getattr(last_session, "my_followers_count", None)
+            if following_now is None:
+                following_now = getattr(last_session, "my_following_count", None)
+        elif isinstance(last_session, dict):
+            profile = last_session.get("profile", {})
+            if followers_now is None:
+                followers_now = profile.get("followers")
+            if following_now is None:
+                following_now = profile.get("following")
+    if followers_now is None or following_now is None:
+        username = getattr(getattr(conf, "args", None), "username", None)
+        file_followers, file_following = _load_last_profile_counts(username)
+        if followers_now is None:
+            followers_now = file_followers
+        if following_now is None:
+            following_now = file_following
+    return followers_now, following_now
+
+
+def print_telegram_reports(
+    conf,
+    telegram_reports_at_end,
+    followers_now,
+    following_now,
+    time_left=None,
+    session_state=None,
+    sessions=None,
+):
+    if not telegram_reports_at_end or conf is None:
+        return
+    if "telegram-reports" not in conf.actions:
+        logger.warning("Telegram report skipped: plugin not loaded.")
+        return
+    followers_now, following_now = _resolve_telegram_counts(
+        conf,
+        session_state=session_state,
+        sessions=sessions,
+        followers_now=followers_now,
+        following_now=following_now,
+    )
+    if followers_now is None or following_now is None:
+        logger.warning(
+            "Telegram report skipped: follower/following counts unavailable."
         )
+        return
+    conf.actions["telegram-reports"].run(
+        conf, "telegram-reports", followers_now, following_now, time_left
+    )
 
 
 def kill_atx_agent(device):
@@ -572,6 +673,20 @@ def trim_txt(source: str, target: str) -> None:
 
 
 def stop_bot(device, sessions, session_state, was_sleeping=False):
+    if session_state is not None:
+        session_state.finishTime = datetime.now()
+        print_full_report(sessions, configs.args.scrape_to_file)
+        if not was_sleeping:
+            sessions.persist(directory=session_state.my_username)
+        if getattr(args, "telegram_reports", False):
+            print_telegram_reports(
+                configs,
+                True,
+                None,
+                None,
+                session_state=session_state,
+                sessions=sessions,
+            )
     close_instagram(device)
     if args.kill_atx_agent:
         kill_atx_agent(device)
@@ -580,10 +695,6 @@ def stop_bot(device, sessions, session_state, was_sleeping=False):
         f"-------- FINISH: {datetime.now().strftime('%H:%M:%S')} --------",
         extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
     )
-    if session_state is not None:
-        print_full_report(sessions, configs.args.scrape_to_file)
-        if not was_sleeping:
-            sessions.persist(directory=session_state.my_username)
     ask_for_a_donation()
     sys.exit(2)
 

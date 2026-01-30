@@ -9,3 +9,7 @@ atomicwrites==1.4.0
 spintax==1.0.4
 requests~=2.31.0
 packaging>=26.0
+imageio==2.34.1
+imageio-ffmpeg==0.5.1
+opencv-python-headless==4.10.0.84
+websocket-client==1.7.0

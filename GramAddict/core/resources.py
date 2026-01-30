@@ -36,6 +36,9 @@ class ResourceID:
         self.CLIPS_ITEM_OVERLAY_COMPONENT = f"{APP_ID}:id/clips_item_overlay_component"
         self.CLIPS_UFI_COMPONENT = f"{APP_ID}:id/clips_ufi_component"
         self.CLIPS_AUTHOR_USERNAME = f"{APP_ID}:id/clips_author_username"
+        self.CLIPS_SINGLE_IMAGE_MEDIA_CONTENT = (
+            f"{APP_ID}:id/clips_single_image_media_content"
+        )
         self.CLIPS_SWIPE_REFRESH_CONTAINER = f"{APP_ID}:id/clips_swipe_refresh_container"
         self.CLIPS_LINEAR_LAYOUT_CONTAINER = (
             f"{APP_ID}:id/clips_linear_layout_container"
@@ -66,6 +69,7 @@ class ResourceID:
         self.FOOTER_SPACE = f"{APP_ID}:id/footer_space"
         self.GAP_VIEW = f"{APP_ID}:id/gap_view"
         self.GAP_BINDER_GROUP = f"{APP_ID}:id/gap_binder_group"
+        self.GRID_CARD_LAYOUT_CONTAINER = f"{APP_ID}:id/grid_card_layout_container"
         self.IGDS_HEADLINE_BODY = f"{APP_ID}:id/igds_headline_body"
         self.IGDS_HEADLINE_EMPHASIZED_HEADLINE = (
             f"{APP_ID}:id/igds_headline_emphasized_headline"
@@ -205,6 +209,8 @@ class ResourceID:
         self.ROW_SEARCH_EDIT_TEXT = f"{APP_ID}:id/row_search_edit_text"
         self.ROW_SEARCH_USER_USERNAME = f"{APP_ID}:id/row_search_user_username"
         self.SEARCH_REEL_INDICATOR = f"{APP_ID}:id/preview_clip_play_count"
+        self.PLAY_COUNT_CONTAINER = f"{APP_ID}:id/play_count_container"
+        self.PLAY_COUNT_LOGO = f"{APP_ID}:id/play_count_logo"
         self.ROW_SIMPLE_TEXT_TEXTVIEW = f"{APP_ID}:id/row_simple_text_textview"
         self.ROW_THREAD_COMPOSER_BUTTON_SEND = (
             f"{APP_ID}:id/row_thread_composer_button_send"

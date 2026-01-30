@@ -1,6 +1,6 @@
 import logging
 from random import randint, uniform
-from time import sleep
+from time import sleep, time
 from typing import Tuple
 
 from GramAddict.core.decorators import run_safely
@@ -8,11 +8,15 @@ from GramAddict.core.device_facade import Timeout
 from GramAddict.core.plugin_loader import Plugin
 from GramAddict.core.resources import ResourceID as resources
 from GramAddict.core.utils import get_value, random_sleep
+from GramAddict.core.utils import stop_bot
 from GramAddict.core.views import (
     Direction,
+    PostsViewList,
     TabBarView,
     UniversalActions,
+    _click_reel_like_button,
     _double_tap_reel_media,
+    _is_reel_liked,
     _reel_like_use_double_tap,
     case_insensitive_re,
 )
@@ -68,6 +72,7 @@ class WatchReels(Plugin):
         self.sessions = sessions
         self.session_state = sessions[-1]
         self.args = configs.args
+        self.storage = storage
         self.current_mode = plugin
         self.ResourceID = resources(self.args.app_id)
 
@@ -123,36 +128,61 @@ class WatchReels(Plugin):
         likes_limit_logged = False
         reel_likes_limit_logged = False
         reel_watch_limit_logged = False
+        extra_watch_logged = False
+        extra_watch_remaining = None
         reels_likes_limit = int(self.session_state.args.current_reels_likes_limit)
         reels_watches_limit = int(self.session_state.args.current_reels_watches_limit)
+        extra_watch_limit = int(
+            self.session_state.args.current_reels_watch_after_like_limit
+        )
+        if reels_watches_limit == 0:
+            logger.info("Reel watch limit is 0; skipping reels.")
+            return
         while watched < reels_count:
+            reel_start = time()
             if (
                 reels_watches_limit > 0
                 and self.session_state.totalReelWatched >= reels_watches_limit
             ):
                 if not reel_watch_limit_logged:
-                    logger.info("Reel watch limit reached; stopping reels.")
+                    logger.info("Reel watch limit reached; stopping session.")
                     reel_watch_limit_logged = True
-                break
-            if self.session_state.check_limit(
-                limit_type=self.session_state.Limit.ALL, output=True
-            )[0]:
-                logger.info("Session limits reached, stopping reels.")
-                break
-
-            # Detect ad reel (but still watch); gate likes on ads by config
-            is_ad, ad_reason = self._is_reel_ad(device)
-            if is_ad and not self.args.reels_like_ads:
-                logger.debug(
-                    f"Reel marked as ad ({ad_reason}); skipping immediately (no watch/like)."
-                )
-                UniversalActions(device)._swipe_points(direction=Direction.UP, delta_y=800)
-                random_sleep(inf=0.5, sup=1.2, modulable=False)
-                watched += 1
-                self.session_state.totalWatched += 1
-                self.session_state.totalReelWatched += 1
-                continue
-
+                stop_bot(device, self.sessions, self.session_state)
+                return
+            username = PostsViewList(device)._get_reel_author_username()
+            if not username:
+                logger.debug("Reel author not detected; cannot check interacted history.")
+            skip_like_for_user = False
+            if self.storage is not None and username:
+                if self.storage.is_user_in_blacklist(username):
+                    logger.info(f"@{username} is in blacklist. Skip reel interaction.")
+                    skip_like_for_user = True
+                else:
+                    interacted, interacted_when = self.storage.check_user_was_interacted(
+                        username
+                    )
+                    if interacted:
+                        can_reinteract = self.storage.can_be_reinteract(
+                            interacted_when,
+                            get_value(self.args.can_reinteract_after, None, 0),
+                        )
+                        logger.info(
+                            f"@{username}: already interacted on {interacted_when:%Y/%m/%d %H:%M:%S}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                        )
+                        if not can_reinteract:
+                            skip_like_for_user = True
+            already_liked = _is_reel_liked(device)
+            if already_liked:
+                logger.info("Reel already liked; skipping like.")
+                skip_like_for_user = True
+                if self.storage is not None and username:
+                    self.storage.add_interacted_user(
+                        username,
+                        session_id=self.session_state.id,
+                        liked=1,
+                        job_name=self.current_mode,
+                        target=None,
+                    )
             likes_limit = int(self.session_state.args.current_likes_limit)
             global_likes_reached = (
                 likes_limit > 0 and self.session_state.totalLikes >= likes_limit
@@ -168,47 +198,120 @@ class WatchReels(Plugin):
             if reel_likes_reached and not reel_likes_limit_logged:
                 logger.info("Reel-like limit reached; skipping reel likes.")
                 reel_likes_limit_logged = True
+            if likes_limit_reached and extra_watch_remaining is None:
+                extra_watch_remaining = max(0, extra_watch_limit)
+                if extra_watch_remaining == 0:
+                    logger.info(
+                        "Like limit reached; extra watch disabled, stopping reels."
+                    )
+                    break
+                if not extra_watch_logged:
+                    logger.info(
+                        f"Like limit reached; watching {extra_watch_remaining} more reels before exiting."
+                    )
+                    extra_watch_logged = True
+
+            if self.session_state.check_limit(
+                limit_type=self.session_state.Limit.ALL, output=True
+            )[0]:
+                logger.info("Session limits reached while watching reels; stopping session.")
+                stop_bot(device, self.sessions, self.session_state)
+
+            # Detect ad reel (but still watch); gate likes on ads by config
+            is_ad, ad_reason = self._is_reel_ad(device)
+            if is_ad and not self.args.reels_like_ads:
+                logger.debug(
+                    f"Reel marked as ad ({ad_reason}); skipping immediately (no watch/like)."
+                )
+                UniversalActions(device)._swipe_points(direction=Direction.UP, delta_y=800)
+                random_sleep(inf=0.5, sup=1.2, modulable=False)
+                watched += 1
+                self.session_state.totalWatched += 1
+                self.session_state.totalReelWatched += 1
+                if extra_watch_remaining is not None:
+                    extra_watch_remaining -= 1
+                    if extra_watch_remaining <= 0:
+                        logger.info(
+                            "Like limit reached; extra reels watched, exiting."
+                        )
+                        break
+                continue
 
             if (
                 like_percentage
                 and not likes_limit_reached
+                and not skip_like_for_user
                 and (self.args.reels_like_ads or not is_ad)
                 and randint(1, 100) <= like_percentage
             ):
                 used_doubletap = _reel_like_use_double_tap(doubletap_pct)
+                liked = None
+                method = None
                 if used_doubletap and _double_tap_reel_media(device):
+                    random_sleep(inf=0.3, sup=0.7, modulable=False)
+                    liked = _is_reel_liked(device)
+                    if not liked:
+                        logger.info(
+                            "Double-tap did not confirm like; trying heart."
+                        )
+                        liked = _click_reel_like_button(device)
+                        if liked:
+                            method = "heart"
+                    else:
+                        method = "double-tap"
+                else:
+                    liked = _click_reel_like_button(device)
+                    if liked:
+                        method = "heart"
+                if liked:
                     self.session_state.totalLikes += 1
                     self.session_state.totalReelLikes += 1
                     logger.info(
-                        f"Liked reel #{watched + 1}{' (ad)' if is_ad else ''} (double-tap)."
+                        f"Liked reel #{watched + 1}{' (ad)' if is_ad else ''} ({method})."
                     )
-                else:
-                    like_btn = device.find(resourceIdMatches=self.ResourceID.LIKE_BUTTON)
-                    if not like_btn.exists():
-                        like_btn = device.find(
-                            descriptionMatches=case_insensitive_re("like")
+                    if self.storage is not None and username:
+                        self.storage.add_interacted_user(
+                            username,
+                            session_id=self.session_state.id,
+                            liked=1,
+                            job_name=self.current_mode,
+                            target=None,
                         )
-                    if like_btn.exists(Timeout.SHORT):
-                        like_btn.click()
-                        UniversalActions.detect_block(device)
-                        self.session_state.totalLikes += 1
-                        self.session_state.totalReelLikes += 1
-                        logger.info(
-                            f"Liked reel #{watched + 1}{' (ad)' if is_ad else ''} (heart)."
-                        )
+                elif liked is None:
+                    logger.warning("Reel like could not be confirmed.")
 
             dwell = dwell_ads if is_ad else dwell_regular
             stay_time = max(1, dwell)
             watch_for = max(1, uniform(stay_time - 0.5, stay_time + 1))
-            logger.info(f"Watching reel #{watched + 1} for ~{watch_for:.1f}s.")
-            sleep(watch_for)
+            elapsed = time() - reel_start
+            remaining = max(0.0, watch_for - elapsed)
+            if remaining <= 0.2:
+                logger.info(
+                    f"Watching reel #{watched + 1} for ~{watch_for:.1f}s (elapsed {elapsed:.1f}s; no extra wait)."
+                )
+            else:
+                logger.info(
+                    f"Watching reel #{watched + 1} for ~{watch_for:.1f}s (elapsed {elapsed:.1f}s, remaining {remaining:.1f}s)."
+                )
+                sleep(remaining)
 
             watched += 1
             self.session_state.totalWatched += 1
             self.session_state.totalReelWatched += 1
+            if extra_watch_remaining is not None:
+                extra_watch_remaining -= 1
+                if extra_watch_remaining <= 0:
+                    logger.info(
+                        "Like limit reached; extra reels watched, exiting."
+                    )
+                    break
 
             UniversalActions(device)._swipe_points(direction=Direction.UP, delta_y=800)
             random_sleep(inf=1, sup=2, modulable=False)
+
+        if self.session_state.check_limit(limit_type=self.session_state.Limit.ALL)[0]:
+            logger.info("Session limits reached after reels; stopping session.")
+            stop_bot(device, self.sessions, self.session_state)
 
     def _is_reel_ad(self, device) -> Tuple[bool, str]:
         # Reuse feed ad heuristics: sponsored root, ad badge, or localized labels

@@ -101,6 +101,8 @@ def handle_blogger(
     interaction,
     is_follow_limit_reached,
 ):
+    if session_state.job_limits_reached():
+        return
     if not nav_to_blogger(device, blogger, session_state.my_username):
         return
     can_interact = False
@@ -172,8 +174,11 @@ def handle_blogger_from_file(
         )
         not_found = []
         processed_users = 0
+        session_state = getattr(self, "session_state", None)
         try:
             for line, username_raw in enumerate(usernames, start=1):
+                if session_state is not None and session_state.job_limits_reached():
+                    return
                 username = username_raw.strip()
                 can_interact = False
                 if current_job == "unfollow-from-file":
@@ -301,29 +306,120 @@ def handle_likers(
         current_job == "blogger-post-likers"
         and not nav_to_post_likers(device, target, session_state.my_username)
         or current_job != "blogger-post-likers"
-        and not nav_to_hashtag_or_place(device, target, current_job)
+        and not nav_to_hashtag_or_place(
+            device, target, current_job, storage=storage, args=self.args
+        )
     ):
         return False
     post_description = ""
     nr_same_post = 0
     nr_same_posts_max = 3
     post_view_list = PostsViewList(device)
+    opened_post_view = OpenedPostView(device)
+    recover_attempts = 0
     while True:
-        if post_view_list.maybe_watch_reel_viewer(session_state):
+        if session_state.job_limits_reached():
+            return True
+        if post_view_list.maybe_watch_reel_viewer(
+            session_state, storage=storage, current_job=current_job, target=target
+        ):
+            if post_view_list.last_reel_handled:
+                recover_attempts = 0
+                post_view_list.last_reel_handled = False
             continue
 
-        flag, post_description, _, _, _, _ = post_view_list._check_if_last_post(
-            post_description, current_job
-        )
+        if not post_view_list.in_post_view():
+            recover_attempts += 1
+            logger.info("Not in post view, reopening a result to continue.")
+            if recover_attempts > 3:
+                logger.warning("Too many recover attempts; skipping this source.")
+                break
+            if current_job == "blogger-post-likers":
+                if not nav_to_post_likers(device, target, session_state.my_username):
+                    break
+            elif current_job.startswith(("hashtag", "place")):
+                if not nav_to_hashtag_or_place(
+                    device, target, current_job, storage=storage, args=self.args
+                ):
+                    break
+            else:
+                device.back()
+            continue
+        else:
+            recover_attempts = 0
+        post_view_list.log_media_detection()
+
+        (
+            flag,
+            post_description,
+            username,
+            _is_ad,
+            _is_hashtag,
+            _,
+        ) = post_view_list._check_if_last_post(post_description, current_job)
         if getattr(post_view_list, "reel_flag", False):
             post_view_list.reel_flag = False
-            if post_view_list.maybe_watch_reel_viewer(session_state, force=True):
+            if post_view_list.maybe_watch_reel_viewer(
+                session_state,
+                force=True,
+                storage=storage,
+                current_job=current_job,
+                target=target,
+            ):
+                if post_view_list.last_reel_handled:
+                    recover_attempts = 0
+                    post_view_list.last_reel_handled = False
                 continue
         if post_view_list._is_in_reel_viewer():
-            if post_view_list.maybe_watch_reel_viewer(session_state, force=True):
+            if post_view_list.maybe_watch_reel_viewer(
+                session_state,
+                force=True,
+                storage=storage,
+                current_job=current_job,
+                target=target,
+            ):
+                if post_view_list.last_reel_handled:
+                    recover_attempts = 0
+                    post_view_list.last_reel_handled = False
                 continue
 
+        already_liked, _ = opened_post_view._is_post_liked()
+        if already_liked:
+            logger.info("Post already liked; skipping to next result.")
+            post_view_list.swipe_to_fit_posts(SwipeTo.NEXT_POST)
+            continue
+        if storage is not None and username and current_job not in (None, "feed"):
+            interacted, interacted_when = storage.check_user_was_interacted(username)
+            if interacted:
+                can_reinteract = storage.can_be_reinteract(
+                    interacted_when,
+                    get_value(self.args.can_reinteract_after, None, 0),
+                )
+                logger.info(
+                    f"@{username}: already interacted on {interacted_when:%Y/%m/%d %H:%M:%S}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                )
+                if not can_reinteract:
+                    post_view_list.swipe_to_fit_posts(SwipeTo.NEXT_POST)
+                    continue
+
         has_likers, number_of_likers = post_view_list._find_likers_container()
+        if not post_view_list.in_post_view():
+            recover_attempts += 1
+            logger.info("Lost post view while scrolling; reopening source.")
+            if recover_attempts > 3:
+                logger.warning("Too many recover attempts; skipping this source.")
+                break
+            if current_job == "blogger-post-likers":
+                if not nav_to_post_likers(device, target, session_state.my_username):
+                    break
+            elif current_job.startswith(("hashtag", "place")):
+                if not nav_to_hashtag_or_place(
+                    device, target, current_job, storage=storage, args=self.args
+                ):
+                    break
+            else:
+                device.back()
+            continue
         if getattr(post_view_list, "reel_flag", False):
             post_view_list.reel_flag = False
             if post_view_list.maybe_watch_reel_viewer(session_state, force=True):
@@ -515,7 +611,9 @@ def handle_posts(
         )
         count = 0
         PostsViewList(device)._refresh_feed()
-    elif not nav_to_hashtag_or_place(device, target, current_job):
+    elif not nav_to_hashtag_or_place(
+        device, target, current_job, storage=storage, args=self.args
+    ):
         return
 
     post_description = ""
@@ -529,13 +627,20 @@ def handle_posts(
     opened_post_view = OpenedPostView(device)
     like_ads_percentage = get_value(
         self.args.like_ads_percentage,
-        "Chance to like ads: {}",
+        "Chance to like ads: {}%",
         0,
     )
     recover_attempts = 0
     while True:
+        if session_state.job_limits_reached():
+            return
         # If we accidentally landed in the reels viewer (e.g., from search/grid), handle/exit immediately.
-        if post_view_list.maybe_watch_reel_viewer(session_state):
+        if post_view_list.maybe_watch_reel_viewer(
+            session_state, storage=storage, current_job=current_job, target=target
+        ):
+            if post_view_list.last_reel_handled:
+                recover_attempts = 0
+                post_view_list.last_reel_handled = False
             continue
         # Ensure we are actually on a post view; if not, reopen the target grid and pick another tile
         if not post_view_list.in_post_view():
@@ -546,7 +651,9 @@ def handle_posts(
                 break
             if current_job.startswith(("hashtag", "place")):
                 # Re-enter the grid and open again (non-reel logic inside nav)
-                if not nav_to_hashtag_or_place(device, target, current_job):
+                if not nav_to_hashtag_or_place(
+                    device, target, current_job, storage=storage, args=self.args
+                ):
                     break
             elif current_job == "feed":
                 nav_to_feed(device)
@@ -556,6 +663,7 @@ def handle_posts(
             continue
         else:
             recover_attempts = 0
+        post_view_list.log_media_detection()
         (
             is_same_post,
             post_description,
@@ -566,11 +674,29 @@ def handle_posts(
         ) = post_view_list._check_if_last_post(post_description, current_job)
         if getattr(post_view_list, "reel_flag", False):
             post_view_list.reel_flag = False
-            if post_view_list.maybe_watch_reel_viewer(session_state, force=True):
+            if post_view_list.maybe_watch_reel_viewer(
+                session_state,
+                force=True,
+                storage=storage,
+                current_job=current_job,
+                target=target,
+            ):
+                if post_view_list.last_reel_handled:
+                    recover_attempts = 0
+                    post_view_list.last_reel_handled = False
                 continue
         # If we ended up in reels viewer during post inspection, handle it now.
         if post_view_list._is_in_reel_viewer():
-            if post_view_list.maybe_watch_reel_viewer(session_state, force=True):
+            if post_view_list.maybe_watch_reel_viewer(
+                session_state,
+                force=True,
+                storage=storage,
+                current_job=current_job,
+                target=target,
+            ):
+                if post_view_list.last_reel_handled:
+                    recover_attempts = 0
+                    post_view_list.last_reel_handled = False
                 continue
         has_likers, number_of_likers = post_view_list._find_likers_container()
         # If we lost the post view (e.g., back on search/history) after scrolling, recover.
@@ -581,7 +707,9 @@ def handle_posts(
                 logger.warning("Too many recover attempts; skipping this source.")
                 break
             if current_job.startswith(("hashtag", "place")):
-                if not nav_to_hashtag_or_place(device, target, current_job):
+                if not nav_to_hashtag_or_place(
+                    device, target, current_job, storage=storage, args=self.args
+                ):
                     break
             elif current_job == "feed":
                 nav_to_feed(device)
@@ -784,6 +912,8 @@ def handle_followers(
         return row_search.exists()
 
     while True:
+        if session_state.job_limits_reached():
+            return
         logger.info("Iterate over visible followers.")
         screen_iterated_followers = []
         screen_skipped_followers_count = 0

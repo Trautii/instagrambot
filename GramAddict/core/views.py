@@ -2,6 +2,7 @@ import datetime
 import logging
 import re
 import platform
+from collections import deque
 from enum import Enum, auto
 from random import choice, randint, uniform
 from time import sleep
@@ -25,11 +26,276 @@ from GramAddict.core.utils import (
     ActionBlockedError,
     Square,
     get_value,
+    random_choice,
     random_sleep,
     save_crash,
+    stop_bot,
 )
 
 logger = logging.getLogger(__name__)
+_RECENT_GRID_TILES = deque(maxlen=30)
+
+
+def _select_grid_recycler_view(device: DeviceFacade):
+    """Pick the RecyclerView that actually contains the search grid tiles."""
+    selector = device.find(
+        resourceIdMatches=ResourceID.RECYCLER_VIEW,
+        className=ClassName.RECYCLER_VIEW,
+    )
+    if not selector.exists(Timeout.LONG):
+        logger.debug("RecyclerView doesn't exists.")
+        return selector
+    try:
+        count = selector.count_items()
+    except Exception:
+        count = 1
+    if count <= 1:
+        return device.find(
+            resourceIdMatches=ResourceID.RECYCLER_VIEW,
+            className=ClassName.RECYCLER_VIEW,
+            index=0,
+        )
+    best = None
+    best_idx = None
+    best_area = -1
+    for idx in range(count):
+        rv = device.find(
+            resourceIdMatches=ResourceID.RECYCLER_VIEW,
+            className=ClassName.RECYCLER_VIEW,
+            index=idx,
+        )
+        if not rv.exists(Timeout.TINY):
+            continue
+        has_grid_tile = False
+        try:
+            has_grid_tile = rv.child(
+                resourceId=ResourceID.GRID_CARD_LAYOUT_CONTAINER
+            ).exists(Timeout.TINY)
+        except Exception:
+            has_grid_tile = False
+        if not has_grid_tile:
+            try:
+                has_grid_tile = rv.child(
+                    resourceId=ResourceID.PLAY_COUNT_CONTAINER
+                ).exists(Timeout.TINY)
+            except Exception:
+                has_grid_tile = False
+        if not has_grid_tile:
+            continue
+        try:
+            bounds = rv.get_bounds()
+            area = (bounds["right"] - bounds["left"]) * (
+                bounds["bottom"] - bounds["top"]
+            )
+        except Exception:
+            area = 0
+        if area > best_area:
+            best_area = area
+            best = rv
+            best_idx = idx
+    if best is not None:
+        logger.debug(
+            f"RecyclerView candidates: {count}; picked index {best_idx}."
+        )
+        return best
+    return device.find(
+        resourceIdMatches=ResourceID.RECYCLER_VIEW,
+        className=ClassName.RECYCLER_VIEW,
+        index=0,
+    )
+
+
+def _collect_grid_tiles(
+    device: DeviceFacade,
+    recycler: Optional[DeviceFacade.View],
+    allow_reels: bool = False,
+):
+    """Collect visible grid tiles without iterating the recycler view directly."""
+    tiles = []
+    seen_keys = set()
+    bounds = None
+    if recycler is not None:
+        try:
+            if recycler.exists(Timeout.TINY):
+                bounds = recycler.get_bounds()
+        except Exception:
+            bounds = None
+
+    def _within_bounds(b: dict) -> bool:
+        if not bounds:
+            return True
+        cx = (b["left"] + b["right"]) / 2
+        cy = (b["top"] + b["bottom"]) / 2
+        return (
+            bounds["left"] <= cx <= bounds["right"]
+            and bounds["top"] <= cy <= bounds["bottom"]
+        )
+
+    def _add_tile(tile, key_prefix: str):
+        try:
+            if not tile.exists(Timeout.TINY):
+                return
+            tile_bounds = tile.get_bounds()
+        except Exception:
+            return
+        if not _within_bounds(tile_bounds):
+            return
+        key = f"{key_prefix}:{tile_bounds.get('left')}:{tile_bounds.get('top')}"
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        tiles.append(tile)
+
+    # Regular grid tiles
+    tile_selector = device.find(resourceId=ResourceID.GRID_CARD_LAYOUT_CONTAINER)
+    try:
+        tile_count = tile_selector.count_items()
+    except Exception:
+        tile_count = 0
+    for idx in range(min(tile_count, 30)):
+        tile = device.find(resourceId=ResourceID.GRID_CARD_LAYOUT_CONTAINER, index=idx)
+        _add_tile(tile, "grid")
+
+    # Reel tiles (play count badge)
+    if allow_reels:
+        reel_selector = device.find(resourceId=ResourceID.PLAY_COUNT_CONTAINER)
+        try:
+            reel_count = reel_selector.count_items()
+        except Exception:
+            reel_count = 0
+        for idx in range(min(reel_count, 15)):
+            reel = device.find(
+                resourceId=ResourceID.PLAY_COUNT_CONTAINER, index=idx
+            )
+            try:
+                tile = reel.up()
+            except Exception:
+                tile = None
+            if tile is None:
+                continue
+            _add_tile(tile, "reel")
+
+    # Fallback: if nothing collected, try to iterate the recycler directly (best effort).
+    if not tiles and recycler is not None:
+        try:
+            for idx, tile in enumerate(recycler):
+                if idx > 15:
+                    break
+                tiles.append(tile)
+        except Exception:
+            pass
+    return tiles
+
+
+def _search_ui_visible(device: DeviceFacade) -> bool:
+    match_ids = case_insensitive_re(
+        f"{ResourceID.ACTION_BAR_SEARCH_EDIT_TEXT}|"
+        f"{ResourceID.ROW_SEARCH_EDIT_TEXT}|"
+        f"{ResourceID.SEARCH_TAB_BAR_LAYOUT}"
+    )
+    try:
+        return device.find(resourceIdMatches=match_ids).exists(Timeout.TINY)
+    except Exception:
+        return False
+
+
+def _fast_open_random_grid_click(
+    device: DeviceFacade,
+    recycler: Optional[DeviceFacade.View],
+    attempts: int = 3,
+) -> bool:
+    if recycler is None or not recycler.exists(Timeout.TINY):
+        return False
+    try:
+        bounds = recycler.get_bounds()
+    except Exception:
+        return False
+    width = bounds["right"] - bounds["left"]
+    height = bounds["bottom"] - bounds["top"]
+    if width <= 0 or height <= 0:
+        return False
+    col_width = width / 3
+    min_y = bounds["top"] + height * 0.08
+    max_y = bounds["bottom"] - height * 0.05
+    for _ in range(max(attempts, 1)):
+        col = randint(0, 2)
+        x = int(bounds["left"] + col_width * (col + uniform(0.2, 0.8)))
+        y = int(uniform(min_y, max_y))
+        try:
+            logger.debug(
+                f"Fast grid click at ({x},{y}). Bounds: ({bounds['left']}-{bounds['right']},{bounds['top']}-{bounds['bottom']})"
+            )
+            device.deviceV2.click(x, y)
+            random_sleep(0.6, 1.2, modulable=False)
+        except Exception:
+            continue
+        if not _search_ui_visible(device):
+            return True
+    return False
+
+
+def _grid_tile_desc(tile, image) -> str:
+    """Best-effort content description from a grid tile."""
+    for getter in (
+        getattr(tile, "get_desc", None),
+        getattr(image, "get_desc", None),
+        getattr(tile, "get_text", None),
+        getattr(image, "get_text", None),
+    ):
+        if getter is None:
+            continue
+        try:
+            desc = getter()
+        except Exception:
+            continue
+        if desc:
+            return str(desc).strip()
+    return ""
+
+
+def _parse_username_from_tile_desc(desc: str) -> Optional[str]:
+    if not desc:
+        return None
+    # Common accessibility strings: "Photo by <user>", "Reel by <user>", etc.
+    match = re.search(
+        r"(?:Photo|Video|Reel|Carousel|Post|Clip|IGTV)\s+by\s+([^\n\.]+)",
+        desc,
+        re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(r"\bby\s+([^\n\.]+)", desc, re.IGNORECASE)
+    if not match:
+        return None
+    username = match.group(1).strip()
+    username = re.split(
+        r"\s+on\s+|[·•|]|\s+at\s+row\s+",
+        username,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    username = username.strip().lstrip("@").strip(" .")
+    return username or None
+
+
+def _grid_tile_signature(
+    username: Optional[str],
+    desc: str,
+    tile,
+    image,
+    idx: int,
+) -> str:
+    if username:
+        return f"user:{username.casefold()}"
+    if desc:
+        return f"desc:{desc}"
+    try:
+        bounds = image.get_bounds() if image is not None else tile.get_bounds()
+        return (
+            f"bounds:{bounds.get('left', 0)}:{bounds.get('top', 0)}:"
+            f"{bounds.get('right', 0)}:{bounds.get('bottom', 0)}"
+        )
+    except Exception:
+        return f"idx:{idx}"
 
 
 def load_config(config):
@@ -77,6 +343,26 @@ def _double_tap_reel_media(device: DeviceFacade) -> bool:
             continue
     return False
 
+
+def _is_reel_liked(device: DeviceFacade) -> Optional[bool]:
+    like_btn = device.find(resourceIdMatches=case_insensitive_re(ResourceID.LIKE_BUTTON))
+    if not like_btn.exists():
+        like_btn = device.find(descriptionMatches=case_insensitive_re("like"))
+    if like_btn.exists(Timeout.SHORT):
+        return like_btn.get_selected()
+    return None
+
+
+def _click_reel_like_button(device: DeviceFacade) -> Optional[bool]:
+    like_btn = device.find(resourceIdMatches=case_insensitive_re(ResourceID.LIKE_BUTTON))
+    if not like_btn.exists():
+        like_btn = device.find(descriptionMatches=case_insensitive_re("like"))
+    if not like_btn.exists(Timeout.SHORT):
+        return None
+    like_btn.click()
+    UniversalActions.detect_block(device)
+    random_sleep(inf=0.3, sup=0.7, modulable=False)
+    return _is_reel_liked(device)
 
 class TabBarTabs(Enum):
     HOME = auto()
@@ -179,6 +465,19 @@ class TabBarView:
                 button = self.device.find(resourceId=ResourceID.FEED_TAB)
 
         elif tab == TabBarTabs.SEARCH:
+            # If we're already on a search results screen (no tab bar), avoid navigating away.
+            try:
+                if self.device.find(
+                    resourceIdMatches=case_insensitive_re(
+                        f"{ResourceID.SEARCH_TAB_BAR_LAYOUT}|"
+                        f"{ResourceID.ACTION_BAR_SEARCH_EDIT_TEXT}|"
+                        f"{ResourceID.ROW_SEARCH_EDIT_TEXT}"
+                    )
+                ).exists(Timeout.TINY):
+                    logger.debug("Search UI detected; already in search context.")
+                    return
+            except Exception:
+                pass
             button = self.device.find(
                 classNameMatches=ClassName.BUTTON_OR_FRAME_LAYOUT_REGEX,
                 descriptionMatches=case_insensitive_re(TabBarText.SEARCH_CONTENT_DESC),
@@ -249,7 +548,16 @@ class TabBarView:
         if button is not None and button.exists(Timeout.MEDIUM):
             # Default to a double tap to refresh tab content; single-tap for tabs where a refresh clears state (search) or triggers extra UI (profile/activity).
             button.click(sleep=SleepTime.SHORT)
-            if tab not in (TabBarTabs.PROFILE, TabBarTabs.ACTIVITY, TabBarTabs.SEARCH):
+            if tab == TabBarTabs.HOME:
+                try:
+                    refresh_pct = get_value(
+                        getattr(args, "home_tab_refresh_percentage", 0), None, 0
+                    )
+                except Exception:
+                    refresh_pct = 0
+                if refresh_pct and random_choice(int(refresh_pct)):
+                    button.click(sleep=SleepTime.SHORT)
+            elif tab not in (TabBarTabs.PROFILE, TabBarTabs.ACTIVITY, TabBarTabs.SEARCH):
                 button.click(sleep=SleepTime.SHORT)
             return
 
@@ -309,49 +617,192 @@ class HashTagView:
         self.device = device
 
     def _getRecyclerView(self):
-        obj = self.device.find(resourceIdMatches=ResourceID.RECYCLER_VIEW)
+        obj = _select_grid_recycler_view(self.device)
         if obj.exists(Timeout.LONG):
             logger.debug("RecyclerView exists.")
-        else:
-            logger.debug("RecyclerView doesn't exists.")
         return obj
 
-    def _getFistImageView(self, recycler):
+    def _getFistImageView(
+        self,
+        recycler,
+        storage=None,
+        current_job: Optional[str] = None,
+        allow_recent: bool = False,
+        allow_reels: bool = False,
+        open_any: bool = False,
+    ):
         """
         Prefer the first non-reel tile to avoid landing in the reels viewer.
         We detect reels via the play-count badge used on search reels results
         (preview_clip_play_count) or a content description containing 'reel'.
         """
-        # Iterate a few visible tiles to find a non-reel candidate
-        for idx, tile in enumerate(recycler):
-            if idx > 6:  # safety: don't walk the whole grid
-                break
-            try:
-                reel_badge = tile.child(resourceId=ResourceID.SEARCH_REEL_INDICATOR)
-                is_reel = reel_badge.exists(Timeout.TINY)
-            except Exception:
-                is_reel = False
-            if not is_reel:
+        candidates = []
+        reel_candidates = []
+        recent_candidates = []
+        recent_reel_candidates = []
+        skipped_interacted = 0
+        seen = set()
+
+        def _tile_looks_like_reel(tile, click_target, desc: str) -> bool:
+            for candidate in (tile, click_target):
+                if candidate is None:
+                    continue
                 try:
-                    desc = tile.get_desc() or ""
-                    if re.search(r"\breel\b", desc, re.IGNORECASE):
-                        is_reel = True
+                    reel_badge = candidate.child(
+                        resourceId=ResourceID.SEARCH_REEL_INDICATOR
+                    )
+                    if reel_badge.exists(Timeout.TINY):
+                        return True
+                    if candidate.child(
+                        resourceId=ResourceID.PLAY_COUNT_CONTAINER
+                    ).exists(Timeout.TINY):
+                        return True
+                    if candidate.child(
+                        resourceId=ResourceID.PLAY_COUNT_LOGO
+                    ).exists(Timeout.TINY):
+                        return True
                 except Exception:
-                    pass
+                    continue
+            return bool(desc and re.search(r"\breel\b", desc, re.IGNORECASE))
+
+        def _consider_tile(tile, click_target, idx, is_reel: Optional[bool] = None):
+            nonlocal skipped_interacted
+            if click_target is None:
+                return
+            desc = _grid_tile_desc(tile, click_target)
+            username = _parse_username_from_tile_desc(desc)
+            if is_reel is None and not open_any:
+                is_reel = _tile_looks_like_reel(tile, click_target, desc)
+            if not open_any:
+                if (
+                    storage is not None
+                    and username
+                    and current_job not in (None, "feed")
+                ):
+                    if storage.is_user_in_blacklist(username):
+                        logger.debug(
+                            f"Skip grid tile for @{username}: in blacklist."
+                        )
+                        return
+                    interacted, interacted_when = storage.check_user_was_interacted(
+                        username
+                    )
+                    if interacted:
+                        can_reinteract = storage.can_be_reinteract(
+                            interacted_when,
+                            get_value(args.can_reinteract_after, None, 0),
+                        )
+                        if not can_reinteract:
+                            skipped_interacted += 1
+                            return
+            sig = _grid_tile_signature(username, desc, tile, click_target, idx)
+            if sig in seen:
+                return
+            seen.add(sig)
+            if sig in _RECENT_GRID_TILES:
+                if open_any:
+                    recent_candidates.append((click_target, sig))
+                elif is_reel:
+                    recent_reel_candidates.append((click_target, sig))
+                else:
+                    recent_candidates.append((click_target, sig))
+                return
+            if open_any:
+                candidates.append((click_target, sig))
+                return
             if is_reel:
-                logger.debug("Skip reel tile in hashtag grid.")
-                continue
+                if allow_reels:
+                    reel_candidates.append((click_target, sig))
+                else:
+                    logger.debug("Skip reel tile in hashtag grid.")
+                return
+            candidates.append((click_target, sig))
+
+        # Iterate a few visible tiles to find non-reel candidates
+        for idx, tile in enumerate(
+            _collect_grid_tiles(self.device, recycler, allow_reels=allow_reels)
+        ):
+            if idx > 15:
+                break
             image = tile.child(resourceIdMatches=ResourceID.IMAGE_BUTTON)
+            click_target = None
             if image.exists(Timeout.SHORT):
-                logger.debug("First non-reel image in view exists.")
-                return image
-        # Fallback to original first image if no safe tile found
-        obj = recycler.child(resourceIdMatches=ResourceID.IMAGE_BUTTON)
-        if obj.exists(Timeout.LONG):
-            logger.debug("Fallback: first image in view exists.")
-        else:
-            logger.debug("First image in view doesn't exists.")
-        return obj
+                click_target = image
+            else:
+                try:
+                    if tile.info.get("clickable", False):
+                        click_target = tile
+                except Exception:
+                    click_target = tile
+            _consider_tile(tile, click_target, idx)
+
+        # Fallback: when only one tile is detected, scan all visible image buttons inside the grid.
+        if len(candidates) + len(reel_candidates) <= 1:
+            recycler_bounds = None
+            try:
+                if recycler is not None and recycler.exists(Timeout.TINY):
+                    recycler_bounds = recycler.get_bounds()
+            except Exception:
+                recycler_bounds = None
+            if recycler_bounds:
+                for img_idx, image in enumerate(
+                    self.device.find(resourceIdMatches=ResourceID.IMAGE_BUTTON)
+                ):
+                    if img_idx > 24:
+                        break
+                    try:
+                        if not image.exists(Timeout.TINY):
+                            continue
+                        bounds = image.get_bounds()
+                    except Exception:
+                        continue
+                    cx = (bounds["left"] + bounds["right"]) / 2
+                    cy = (bounds["top"] + bounds["bottom"]) / 2
+                    if not (
+                        recycler_bounds["left"] <= cx <= recycler_bounds["right"]
+                        and recycler_bounds["top"] <= cy <= recycler_bounds["bottom"]
+                    ):
+                        continue
+                    tile = image.up()
+                    _consider_tile(tile, image, idx=100 + img_idx)
+        if candidates:
+            if open_any:
+                logger.debug(f"Random tile in view exists ({len(candidates)} candidates).")
+            else:
+                logger.debug(
+                    f"Random non-reel image in view exists ({len(candidates)} candidates)."
+                )
+            picked, sig = choice(candidates)
+            _RECENT_GRID_TILES.append(sig)
+            return picked
+        if not open_any and allow_reels and reel_candidates:
+            logger.debug(
+                f"Random reel tile in view exists ({len(reel_candidates)} candidates)."
+            )
+            picked, sig = choice(reel_candidates)
+            _RECENT_GRID_TILES.append(sig)
+            return picked
+        if allow_recent:
+            if recent_candidates:
+                logger.debug(
+                    f"Only recent tiles found ({len(recent_candidates)})."
+                )
+                picked, sig = choice(recent_candidates)
+                _RECENT_GRID_TILES.append(sig)
+                return picked
+            if not open_any and allow_reels and recent_reel_candidates:
+                logger.debug(
+                    f"Only recent reel tiles found ({len(recent_reel_candidates)})."
+                )
+                picked, sig = choice(recent_reel_candidates)
+                _RECENT_GRID_TILES.append(sig)
+                return picked
+        if skipped_interacted:
+            logger.debug(
+                f"Skipped {skipped_interacted} tile(s) for already-interacted users."
+            )
+        logger.debug("No suitable tiles detected in this view.")
+        return None
 
     def _getRecentTab(self):
         # Recent tab was removed in newer IG; fall back to "For you"/"Top"
@@ -381,43 +832,187 @@ class PlacesView:
         self.device = device
 
     def _getRecyclerView(self):
-        obj = self.device.find(resourceIdMatches=ResourceID.RECYCLER_VIEW)
+        obj = _select_grid_recycler_view(self.device)
         if obj.exists(Timeout.LONG):
             logger.debug("RecyclerView exists.")
-        else:
-            logger.debug("RecyclerView doesn't exists.")
         return obj
 
-    def _getFistImageView(self, recycler):
+    def _getFistImageView(
+        self,
+        recycler,
+        storage=None,
+        current_job: Optional[str] = None,
+        allow_recent: bool = False,
+        allow_reels: bool = False,
+        open_any: bool = False,
+    ):
         # Places grid rarely shows reels; still try to skip them for safety.
-        for idx, tile in enumerate(recycler):
-            if idx > 6:
-                break
-            try:
-                reel_badge = tile.child(resourceId=ResourceID.SEARCH_REEL_INDICATOR)
-                is_reel = reel_badge.exists(Timeout.TINY)
-            except Exception:
-                is_reel = False
-            if not is_reel:
+        candidates = []
+        reel_candidates = []
+        recent_candidates = []
+        recent_reel_candidates = []
+        skipped_interacted = 0
+        seen = set()
+
+        def _tile_looks_like_reel(tile, click_target, desc: str) -> bool:
+            for candidate in (tile, click_target):
+                if candidate is None:
+                    continue
                 try:
-                    desc = tile.get_desc() or ""
-                    if re.search(r"\breel\b", desc, re.IGNORECASE):
-                        is_reel = True
+                    reel_badge = candidate.child(
+                        resourceId=ResourceID.SEARCH_REEL_INDICATOR
+                    )
+                    if reel_badge.exists(Timeout.TINY):
+                        return True
+                    if candidate.child(
+                        resourceId=ResourceID.PLAY_COUNT_CONTAINER
+                    ).exists(Timeout.TINY):
+                        return True
+                    if candidate.child(
+                        resourceId=ResourceID.PLAY_COUNT_LOGO
+                    ).exists(Timeout.TINY):
+                        return True
                 except Exception:
-                    pass
+                    continue
+            return bool(desc and re.search(r"\breel\b", desc, re.IGNORECASE))
+
+        def _consider_tile(tile, click_target, idx, is_reel: Optional[bool] = None):
+            nonlocal skipped_interacted
+            if click_target is None:
+                return
+            desc = _grid_tile_desc(tile, click_target)
+            username = _parse_username_from_tile_desc(desc)
+            if is_reel is None and not open_any:
+                is_reel = _tile_looks_like_reel(tile, click_target, desc)
+            if not open_any:
+                if (
+                    storage is not None
+                    and username
+                    and current_job not in (None, "feed")
+                ):
+                    if storage.is_user_in_blacklist(username):
+                        logger.debug(
+                            f"Skip grid tile for @{username}: in blacklist."
+                        )
+                        return
+                    interacted, interacted_when = storage.check_user_was_interacted(
+                        username
+                    )
+                    if interacted:
+                        can_reinteract = storage.can_be_reinteract(
+                            interacted_when,
+                            get_value(args.can_reinteract_after, None, 0),
+                        )
+                        if not can_reinteract:
+                            skipped_interacted += 1
+                            return
+            sig = _grid_tile_signature(username, desc, tile, click_target, idx)
+            if sig in seen:
+                return
+            seen.add(sig)
+            if sig in _RECENT_GRID_TILES:
+                if open_any:
+                    recent_candidates.append((click_target, sig))
+                elif is_reel:
+                    recent_reel_candidates.append((click_target, sig))
+                else:
+                    recent_candidates.append((click_target, sig))
+                return
+            if open_any:
+                candidates.append((click_target, sig))
+                return
             if is_reel:
-                logger.debug("Skip reel tile in places grid.")
-                continue
+                if allow_reels:
+                    reel_candidates.append((click_target, sig))
+                else:
+                    logger.debug("Skip reel tile in places grid.")
+                return
+            candidates.append((click_target, sig))
+
+        for idx, tile in enumerate(
+            _collect_grid_tiles(self.device, recycler, allow_reels=allow_reels)
+        ):
+            if idx > 15:
+                break
             image = tile.child(resourceIdMatches=ResourceID.IMAGE_BUTTON)
+            click_target = None
             if image.exists(Timeout.SHORT):
-                logger.debug("First non-reel image in view exists.")
-                return image
-        obj = recycler.child(resourceIdMatches=ResourceID.IMAGE_BUTTON)
-        if obj.exists(Timeout.LONG):
-            logger.debug("Fallback: first image in view exists.")
-        else:
-            logger.debug("First image in view doesn't exists.")
-        return obj
+                click_target = image
+            else:
+                try:
+                    if tile.info.get("clickable", False):
+                        click_target = tile
+                except Exception:
+                    click_target = tile
+            _consider_tile(tile, click_target, idx)
+
+        # Fallback: when only one tile is detected, scan all visible image buttons inside the grid.
+        if len(candidates) + len(reel_candidates) <= 1:
+            recycler_bounds = None
+            try:
+                if recycler is not None and recycler.exists(Timeout.TINY):
+                    recycler_bounds = recycler.get_bounds()
+            except Exception:
+                recycler_bounds = None
+            if recycler_bounds:
+                for img_idx, image in enumerate(
+                    self.device.find(resourceIdMatches=ResourceID.IMAGE_BUTTON)
+                ):
+                    if img_idx > 24:
+                        break
+                    try:
+                        if not image.exists(Timeout.TINY):
+                            continue
+                        bounds = image.get_bounds()
+                    except Exception:
+                        continue
+                    cx = (bounds["left"] + bounds["right"]) / 2
+                    cy = (bounds["top"] + bounds["bottom"]) / 2
+                    if not (
+                        recycler_bounds["left"] <= cx <= recycler_bounds["right"]
+                        and recycler_bounds["top"] <= cy <= recycler_bounds["bottom"]
+                    ):
+                        continue
+                    tile = image.up()
+                    _consider_tile(tile, image, idx=100 + img_idx)
+        if candidates:
+            if open_any:
+                logger.debug(f"Random tile in view exists ({len(candidates)} candidates).")
+            else:
+                logger.debug(
+                    f"Random non-reel image in view exists ({len(candidates)} candidates)."
+                )
+            picked, sig = choice(candidates)
+            _RECENT_GRID_TILES.append(sig)
+            return picked
+        if not open_any and allow_reels and reel_candidates:
+            logger.debug(
+                f"Random reel tile in view exists ({len(reel_candidates)} candidates)."
+            )
+            picked, sig = choice(reel_candidates)
+            _RECENT_GRID_TILES.append(sig)
+            return picked
+        if allow_recent:
+            if recent_candidates:
+                logger.debug(
+                    f"Only recent tiles found ({len(recent_candidates)})."
+                )
+                picked, sig = choice(recent_candidates)
+                _RECENT_GRID_TILES.append(sig)
+                return picked
+            if not open_any and allow_reels and recent_reel_candidates:
+                logger.debug(
+                    f"Only recent reel tiles found ({len(recent_reel_candidates)})."
+                )
+                picked, sig = choice(recent_reel_candidates)
+                _RECENT_GRID_TILES.append(sig)
+                return picked
+        if skipped_interacted:
+            logger.debug(
+                f"Skipped {skipped_interacted} tile(s) for already-interacted users."
+            )
+        logger.debug("No suitable tiles detected in this view.")
+        return None
 
     def _getRecentTab(self):
         candidates = [
@@ -462,6 +1057,33 @@ class SearchView:
             TabBarView(self.device).navigateToSearch()
         logger.error("Can't find the search bar!")
         return None
+
+    def is_on_target_results(self, target: str) -> bool:
+        try:
+            search_edit = self.device.find(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.ACTION_BAR_SEARCH_EDIT_TEXT
+                )
+            )
+            if not search_edit.exists(Timeout.TINY):
+                return False
+            current = (search_edit.get_text(error=False) or "").strip()
+            target_norm = emoji.emojize(target, use_aliases=True).strip()
+            current_norm = current.lstrip("#").casefold()
+            target_norm = target_norm.lstrip("#").casefold()
+            if not target_norm or current_norm != target_norm:
+                return False
+            if self.device.find(
+                resourceIdMatches=case_insensitive_re(ResourceID.SEARCH_TAB_BAR_LAYOUT)
+            ).exists(Timeout.TINY):
+                return True
+            if self.device.find(
+                resourceIdMatches=case_insensitive_re(ResourceID.RECYCLER_VIEW)
+            ).exists(Timeout.TINY):
+                return True
+        except Exception:
+            return False
+        return False
 
     def _getUsernameRow(self, username):
         return self.device.find(
@@ -541,6 +1163,9 @@ class SearchView:
     def navigate_to_target(self, target: str, job: str) -> bool:
         target = emoji.emojize(target, use_aliases=True)
         logger.info(f"Navigate to {target}")
+        if self.is_on_target_results(target):
+            logger.info(f"Already on {target} results; skipping re-search.")
+            return True
         search_edit_text = self._getSearchEditText()
         if search_edit_text is not None:
             logger.debug("Pressing on searchbar.")
@@ -608,11 +1233,13 @@ class SearchView:
                 )
                 header.exists(Timeout.LONG)
             # If we landed on a reel from search grid, optionally watch/like before returning
-            self._handle_search_reel_autoplay_if_reel()
+            self._handle_search_reel_autoplay_if_reel(current_job=job, target=target)
             return True
         return False
 
-    def _handle_search_reel_autoplay_if_reel(self):
+    def _handle_search_reel_autoplay_if_reel(
+        self, current_job: Optional[str] = None, target: Optional[str] = None
+    ):
         reels_count = get_value(args.watch_reels, None, 0)
         if reels_count is None:
             reels_count = 0
@@ -624,16 +1251,22 @@ class SearchView:
         )
         if dwell_ads is None:
             dwell_ads = dwell_regular
-        # Detect reel viewer presence
-        reel_view = self.device.find(
-            resourceIdMatches=case_insensitive_re(ResourceID.REEL_VIEWER_MEDIA_CONTAINER)
-        )
-        if not reel_view.exists(Timeout.SHORT):
-            reel_view = self.device.find(
-                resourceIdMatches=case_insensitive_re(ResourceID.CLIPS_VIDEO_CONTAINER)
-            )
-        if not reel_view.exists(Timeout.SHORT):
+        # Detect reel viewer presence using strong reel markers to avoid false positives
+        if not PostsViewList(self.device)._is_in_reel_viewer():
             return
+
+        storage = getattr(configs, "storage", None)
+        if (
+            args.single_image_reels_as_posts
+            and PostsViewList(self.device)._is_single_image_reel()
+        ):
+            session_state = getattr(configs, "session_state", None)
+            return PostsViewList(self.device)._handle_single_image_reel_as_post(
+                session_state,
+                storage=storage,
+                current_job=current_job,
+                target=target,
+            )
 
         if reels_count <= 0:
             logger.info("Reel viewer detected; watch-reels disabled, exiting viewer.")
@@ -646,19 +1279,33 @@ class SearchView:
 
         like_pct = get_value(args.reels_like_percentage, None, 0)
         doubletap_pct = get_value(args.reels_like_doubletap_percentage, None, 0)
-        doubletap_pct = get_value(args.reels_like_doubletap_percentage, None, 0)
         session_state = getattr(configs, "session_state", None)
         likes_limit_logged = False
         reel_likes_limit_logged = False
         reel_watch_limit_logged = False
+        extra_watch_logged = False
+        extra_watch_remaining = None
         reels_likes_limit = 0
         reels_watches_limit = 0
+        extra_watch_limit = 0
         if session_state is not None:
             reels_likes_limit = int(session_state.args.current_reels_likes_limit)
             reels_watches_limit = int(session_state.args.current_reels_watches_limit)
+            extra_watch_limit = int(
+                session_state.args.current_reels_watch_after_like_limit
+            )
+            if reels_watches_limit == 0:
+                logger.info("Reel watch limit is 0; skipping reels.")
+                # Back twice in case the first back closes overlays only
+                self.device.back()
+                random_sleep(inf=0.5, sup=1.2, modulable=False)
+                self.device.back()
+                random_sleep(inf=0.5, sup=1.2, modulable=False)
+                return True
         logger.info(
             f"Reel viewer detected; watching up to {reels_count} reels (watch-reels)."
         )
+        post_view = PostsViewList(self.device)
         for _ in range(reels_count):
             if (
                 session_state is not None
@@ -666,9 +1313,87 @@ class SearchView:
                 and session_state.totalReelWatched >= reels_watches_limit
             ):
                 if not reel_watch_limit_logged:
-                    logger.info("Reel watch limit reached; stopping reels.")
+                    logger.info("Reel watch limit reached; stopping session.")
                     reel_watch_limit_logged = True
-                break
+                sessions = getattr(configs, "sessions", None)
+                if sessions is None:
+                    logger.warning("Sessions list unavailable; exiting reels viewer.")
+                    self.device.back()
+                    random_sleep(inf=0.5, sup=1.2, modulable=False)
+                    self.device.back()
+                    random_sleep(inf=0.5, sup=1.2, modulable=False)
+                    return True
+                stop_bot(self.device, sessions, session_state)
+                return True
+            username = post_view._get_reel_author_username()
+            if not username:
+                logger.debug(
+                    "Reel author not detected; cannot check interacted history."
+                )
+            skip_like_for_user = False
+            if storage is not None and username and current_job not in (None, "feed"):
+                if storage.is_user_in_blacklist(username):
+                    logger.info(f"@{username} is in blacklist. Skip reel interaction.")
+                    skip_like_for_user = True
+                else:
+                    interacted, interacted_when = storage.check_user_was_interacted(
+                        username
+                    )
+                    if interacted:
+                        can_reinteract = storage.can_be_reinteract(
+                            interacted_when,
+                            get_value(args.can_reinteract_after, None, 0),
+                        )
+                        logger.info(
+                            f"@{username}: already interacted on {interacted_when:%Y/%m/%d %H:%M:%S}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                        )
+                        if not can_reinteract:
+                            skip_like_for_user = True
+            already_liked = _is_reel_liked(self.device)
+            if already_liked:
+                logger.info("Reel already liked; skipping like.")
+                skip_like_for_user = True
+                if storage is not None and username and session_state is not None:
+                    storage.add_interacted_user(
+                        username,
+                        session_id=session_state.id,
+                        liked=1,
+                        job_name=current_job,
+                        target=target,
+                    )
+                logger.info("Reel already liked; swiping immediately.")
+                UniversalActions(self.device)._swipe_points(
+                    direction=Direction.UP, delta_y=800
+                )
+                random_sleep(inf=0.1, sup=0.3, modulable=False)
+                if session_state is not None:
+                    session_state.totalWatched += 1
+                    session_state.totalReelWatched += 1
+                    if extra_watch_remaining is not None:
+                        extra_watch_remaining -= 1
+                        if extra_watch_remaining <= 0:
+                            logger.info(
+                                "Like limit reached; extra reels watched, exiting."
+                            )
+                            break
+                    if (
+                        reels_watches_limit > 0
+                        and session_state.totalReelWatched >= reels_watches_limit
+                    ):
+                        logger.info("Reel watch limit reached; stopping session.")
+                        sessions = getattr(configs, "sessions", None)
+                        if sessions is None:
+                            logger.warning(
+                                "Sessions list unavailable; exiting reels viewer."
+                            )
+                            self.device.back()
+                            random_sleep(inf=0.5, sup=1.2, modulable=False)
+                            self.device.back()
+                            random_sleep(inf=0.5, sup=1.2, modulable=False)
+                            return True
+                        stop_bot(self.device, sessions, session_state)
+                        return True
+                continue
             is_ad = self._is_reel_ad_only()
             if is_ad and not args.reels_like_ads:
                 logger.debug("Search reel is an ad; skipping immediately.")
@@ -677,6 +1402,29 @@ class SearchView:
                 if session_state is not None:
                     session_state.totalWatched += 1
                     session_state.totalReelWatched += 1
+                    if extra_watch_remaining is not None:
+                        extra_watch_remaining -= 1
+                        if extra_watch_remaining <= 0:
+                            logger.info(
+                                "Like limit reached; extra reels watched, exiting."
+                            )
+                            break
+                    if (
+                        reels_watches_limit > 0
+                        and session_state.totalReelWatched >= reels_watches_limit
+                    ):
+                        logger.info("Reel watch limit reached; stopping session.")
+                        sessions = getattr(configs, "sessions", None)
+                        if sessions is None:
+                            logger.warning(
+                                "Sessions list unavailable; exiting reels viewer."
+                            )
+                            self._exit_reel_viewer()
+                            self.last_reel_handled = True
+                            return True
+                        stop_bot(self.device, sessions, session_state)
+                        self.last_reel_handled = True
+                        return True
                 continue
 
             likes_limit_reached = False
@@ -696,41 +1444,131 @@ class SearchView:
                     logger.info("Reel-like limit reached; skipping reel likes.")
                     reel_likes_limit_logged = True
                 likes_limit_reached = global_likes_reached or reel_likes_reached
+                if likes_limit_reached and extra_watch_remaining is None:
+                    extra_watch_remaining = max(0, extra_watch_limit)
+                    if extra_watch_remaining == 0:
+                        logger.info(
+                            "Like limit reached; extra watch disabled, stopping reels."
+                        )
+                        break
+                    if not extra_watch_logged:
+                        logger.info(
+                            f"Like limit reached; watching {extra_watch_remaining} more reels before exiting."
+                        )
+                        extra_watch_logged = True
+
+            if session_state is not None:
+                limits_reached, _, _ = session_state.check_limit(
+                    limit_type=session_state.Limit.ALL
+                )
+                if limits_reached:
+                    logger.info(
+                        "Session limits reached while in search reels; stopping session."
+                    )
+                    sessions = getattr(configs, "sessions", None)
+                    if sessions is None:
+                        logger.warning(
+                            "Sessions list unavailable; exiting reels viewer."
+                        )
+                        # Back twice in case the first back closes overlays only
+                        self.device.back()
+                        random_sleep(inf=0.5, sup=1.2, modulable=False)
+                        self.device.back()
+                        random_sleep(inf=0.5, sup=1.2, modulable=False)
+                        return True
+                    stop_bot(self.device, sessions, session_state)
 
             if (
                 like_pct
                 and not likes_limit_reached
+                and not skip_like_for_user
                 and (args.reels_like_ads or not is_ad)
                 and randint(1, 100) <= like_pct
             ):
                 used_doubletap = _reel_like_use_double_tap(doubletap_pct)
+                liked = None
+                method = None
                 if used_doubletap and _double_tap_reel_media(self.device):
-                    logger.info("Liked reel (double-tap).")
+                    random_sleep(inf=0.3, sup=0.7, modulable=False)
+                    liked = _is_reel_liked(self.device)
+                    if not liked:
+                        logger.info(
+                            "Double-tap did not confirm like; trying heart."
+                        )
+                        liked = _click_reel_like_button(self.device)
+                        if liked:
+                            method = "heart"
+                    else:
+                        method = "double-tap"
+                else:
+                    liked = _click_reel_like_button(self.device)
+                    if liked:
+                        method = "heart"
+                if liked:
+                    logger.info(f"Liked reel ({method}).")
                     if session_state is not None:
                         session_state.totalLikes += 1
                         session_state.totalReelLikes += 1
-                else:
-                    like_btn = self.device.find(
-                        resourceIdMatches=case_insensitive_re(ResourceID.LIKE_BUTTON)
-                    )
-                    if not like_btn.exists():
-                        like_btn = self.device.find(
-                            descriptionMatches=case_insensitive_re("like")
+                    if storage is not None and username and session_state is not None:
+                        storage.add_interacted_user(
+                            username,
+                            session_id=session_state.id,
+                            liked=1,
+                            job_name=current_job,
+                            target=target,
                         )
-                    if like_btn.exists(Timeout.SHORT):
-                        like_btn.click()
-                        UniversalActions.detect_block(self.device)
-                        logger.info("Liked reel (heart).")
-                        if session_state is not None:
-                            session_state.totalLikes += 1
-                            session_state.totalReelLikes += 1
+                elif liked is None:
+                    logger.warning("Reel like could not be confirmed.")
             stay_time = dwell_ads if is_ad else dwell_regular
             random_sleep(inf=max(1, stay_time - 1), sup=stay_time + 1, modulable=False)
             if session_state is not None:
                 session_state.totalWatched += 1
                 session_state.totalReelWatched += 1
+                if extra_watch_remaining is not None:
+                    extra_watch_remaining -= 1
+                    if extra_watch_remaining <= 0:
+                        logger.info(
+                            "Like limit reached; extra reels watched, exiting."
+                        )
+                        break
+                if (
+                    reels_watches_limit > 0
+                    and session_state.totalReelWatched >= reels_watches_limit
+                ):
+                    logger.info("Reel watch limit reached; stopping session.")
+                    sessions = getattr(configs, "sessions", None)
+                    if sessions is None:
+                        logger.warning(
+                            "Sessions list unavailable; exiting reels viewer."
+                        )
+                        self.device.back()
+                        random_sleep(inf=0.5, sup=1.2, modulable=False)
+                        self.device.back()
+                        random_sleep(inf=0.5, sup=1.2, modulable=False)
+                        return True
+                    stop_bot(self.device, sessions, session_state)
+                    return True
             logger.info("Swiping to next reel.")
             UniversalActions(self.device)._swipe_points(direction=Direction.UP, delta_y=800)
+        if session_state is not None:
+            limits_reached, _, _ = session_state.check_limit(
+                limit_type=session_state.Limit.ALL
+            )
+            if limits_reached:
+                logger.info(
+                    "Session limits reached after search reels; stopping session."
+                )
+                sessions = getattr(configs, "sessions", None)
+                if sessions is None:
+                    logger.warning(
+                        "Sessions list unavailable; exiting reels viewer."
+                    )
+                    self.device.back()
+                    random_sleep(inf=0.5, sup=1.2, modulable=False)
+                    self.device.back()
+                    random_sleep(inf=0.5, sup=1.2, modulable=False)
+                    return True
+                stop_bot(self.device, sessions, session_state)
         logger.info("Returning from search reels.")
         # Back twice in case the first back closes overlays only
         self.device.back()
@@ -788,6 +1626,58 @@ class PostsViewList:
         self.device = device
         self.has_tags = False
         self.reel_flag = False
+        self._last_media_log_key = None
+        self.last_reel_handled = False
+
+    def _is_single_image_reel(self) -> bool:
+        try:
+            return self.device.find(
+                resourceId=ResourceID.CLIPS_SINGLE_IMAGE_MEDIA_CONTENT
+            ).exists(Timeout.TINY)
+        except Exception:
+            return False
+
+    def _get_reel_author_username(self) -> Optional[str]:
+        try:
+            author = self.device.find(resourceId=ResourceID.CLIPS_AUTHOR_USERNAME)
+            if author.exists(Timeout.TINY):
+                text = (author.get_text(error=False) or "").strip()
+                if text:
+                    return text
+        except Exception:
+            pass
+        # Fallback: parse from content description
+        try:
+            media = self.device.find(resourceId=ResourceID.CLIPS_MEDIA_COMPONENT)
+            if media.exists(Timeout.TINY):
+                desc = media.get_desc() or ""
+                match = re.search(r"Reel by ([^\\.]+)", desc)
+                if match:
+                    return match.group(1).strip()
+        except Exception:
+            pass
+        try:
+            media = self.device.find(resourceId=ResourceID.CLIPS_VIDEO_CONTAINER)
+            if media.exists(Timeout.TINY):
+                desc = media.get_desc() or ""
+                match = re.search(r"Reel by ([^\\.]+)", desc)
+                if match:
+                    return match.group(1).strip()
+        except Exception:
+            pass
+        return None
+
+    def _has_tab_or_search_ui(self) -> bool:
+        # Single selector to keep UIA2 calls minimal on heavy search/grid pages.
+        match_ids = case_insensitive_re(
+            f"{ResourceID.ACTION_BAR_SEARCH_EDIT_TEXT}|"
+            f"{ResourceID.ROW_SEARCH_EDIT_TEXT}|"
+            f"{ResourceID.SEARCH_TAB_BAR_LAYOUT}"
+        )
+        try:
+            return self.device.find(resourceIdMatches=match_ids).exists(Timeout.TINY)
+        except Exception:
+            return False
 
     def _fallback_reel_hit(self) -> bool:
         """
@@ -804,6 +1694,52 @@ class PostsViewList:
         except Exception:
             pass
         return False
+
+    def log_media_detection(self, username: Optional[str] = None) -> None:
+        if self._has_tab_or_search_ui():
+            return
+        if self._is_in_reel_viewer():
+            subtype = None
+            try:
+                if self._is_single_image_reel():
+                    subtype = "single-image"
+                elif self.device.find(
+                    resourceId=ResourceID.CLIPS_VIDEO_CONTAINER
+                ).exists(Timeout.TINY):
+                    subtype = "video"
+            except Exception:
+                subtype = None
+            key = f"reel:{subtype or 'unknown'}:{username or ''}"
+            if key != self._last_media_log_key:
+                if subtype == "single-image" and args.single_image_reels_as_posts:
+                    msg = "Detected media: PHOTO (single-image reel)"
+                else:
+                    msg = "Detected media: REEL"
+                if subtype == "single-image":
+                    if not args.single_image_reels_as_posts:
+                        msg += " (single-image clip)"
+                elif subtype == "video":
+                    msg += " (video)"
+                logger.info(msg)
+                self._last_media_log_key = key
+            return
+
+        if not self.in_post_view():
+            return
+        media, content_desc = self._get_media_container()
+        if content_desc is None:
+            return
+        media_type, obj_count = self.detect_media_type(content_desc)
+        if media_type is None:
+            return
+        key = f"post:{media_type.name}:{obj_count}:{content_desc}"
+        if key == self._last_media_log_key:
+            return
+        if media_type == MediaType.CAROUSEL and obj_count:
+            logger.info(f"Detected media: CAROUSEL ({obj_count} items)")
+        else:
+            logger.info(f"Detected media: {media_type.name}")
+        self._last_media_log_key = key
 
     def _is_reel_ad_only(self) -> bool:
         """Lightweight ad detector for reels to pick dwell timing."""
@@ -838,31 +1774,37 @@ class PostsViewList:
         """
         Detect the full-screen reels/clips viewer reliably across recent IG builds.
         """
-        selectors = [
-            {"resourceIdMatches": case_insensitive_re(ResourceID.REEL_VIEWER_MEDIA_CONTAINER)},
-            {"resourceId": ResourceID.REEL_VIEWER_MEDIA_CONTAINER},
-            {"resourceId": ResourceID.CLIPS_VIDEO_CONTAINER},
-            {"resourceId": ResourceID.CLIPS_VIEWER_CONTAINER},
-            {"resourceId": ResourceID.CLIPS_VIEWER_VIEW_PAGER},
+        if self._has_tab_or_search_ui():
+            logger.debug("Search UI visible; skip reel detection.")
+            return False
+        strong_selectors = [
+            {
+                "resourceId": ResourceID.CLIPS_VIDEO_CONTAINER,
+                "descriptionMatches": case_insensitive_re("Reel by"),
+            },
             {"resourceId": ResourceID.CLIPS_MEDIA_COMPONENT},
             {"resourceId": ResourceID.CLIPS_ITEM_OVERLAY_COMPONENT},
-            {"resourceIdMatches": case_insensitive_re(ResourceID.CLIPS_LINEAR_LAYOUT_CONTAINER)},
-            {"resourceId": ResourceID.CLIPS_ROOT_LAYOUT},
-            {"resourceId": ResourceID.CLIPS_GESTURE_MANAGER},
-            {"resourceId": ResourceID.CLIPS_SWIPE_REFRESH_CONTAINER},
+            {"resourceId": ResourceID.CLIPS_UFI_COMPONENT},
+            {"resourceId": ResourceID.CLIPS_AUTHOR_USERNAME},
+            {"resourceId": ResourceID.REEL_VIEWER_TITLE},
+            {"resourceId": ResourceID.REEL_VIEWER_TIMESTAMP},
             {"descriptionMatches": case_insensitive_re("Reel by")},
         ]
-        for sel in selectors:
+        for sel in strong_selectors:
             try:
                 if self.device.find(**sel).exists(Timeout.SHORT):
-                    logger.debug(f"View classification: REEL (selector={sel})")
+                    logger.debug(f"View classification: REEL (marker={sel})")
                     return True
             except Exception:
                 continue
         # Fallback heuristic: large ViewPager typical of reels viewer
         if self._fallback_reel_hit():
-            logger.debug("View classification: REEL (fallback=viewpager)")
-            return True
+            if self._has_tab_or_search_ui():
+                logger.debug(
+                    "Fallback viewpager detected, but tab/search UI is visible; skip reel classification."
+                )
+                return False
+            logger.debug("View classification: UNKNOWN (fallback=viewpager, no reel markers)")
         return False
 
     def _exit_reel_viewer(self):
@@ -878,6 +1820,9 @@ class PostsViewList:
         """
         Heuristic to decide if we're on a standard post view (not grid, not reels).
         """
+        if self._has_tab_or_search_ui():
+            logger.debug("Search UI visible; not a post view.")
+            return False
         markers = [
             {"resourceIdMatches": ResourceID.MEDIA_CONTAINER},
             {"resourceIdMatches": ResourceID.ROW_FEED_PHOTO_PROFILE_NAME},
@@ -903,11 +1848,21 @@ class PostsViewList:
             logger.debug("View classification: UNKNOWN (not post, not reel)")
         return False
 
-    def maybe_watch_reel_viewer(self, session_state, force: bool = False) -> bool:
+    def maybe_watch_reel_viewer(
+        self,
+        session_state,
+        force: bool = False,
+        storage=None,
+        current_job: Optional[str] = None,
+        target: Optional[str] = None,
+    ) -> bool:
         """If we're in the reels viewer (e.g., opened from search/grid), watch a few reels and return."""
         reels_count = get_value(args.watch_reels, None, 0)
         if reels_count is None:
             reels_count = 0
+
+        if self._has_tab_or_search_ui():
+            return False
 
         # Allow a short wait for the viewer to fully render
         detected = False
@@ -919,13 +1874,27 @@ class PostsViewList:
         if not detected:
             logger.debug("Reel viewer not detected; skipping reel handler.")
             return False
+        self.log_media_detection()
+
+        if args.single_image_reels_as_posts and self._is_single_image_reel():
+            handled = self._handle_single_image_reel_as_post(
+                session_state,
+                storage=storage,
+                current_job=current_job,
+                target=target,
+            )
+            if handled:
+                self.last_reel_handled = True
+            return handled
 
         # Respect 0 == disabled: just back out safely.
         if reels_count <= 0:
             logger.info("Reel viewer detected; watch-reels disabled, exiting viewer.")
             self._exit_reel_viewer()
+            self.last_reel_handled = True
             return True
         like_pct = get_value(args.reels_like_percentage, None, 0)
+        doubletap_pct = get_value(args.reels_like_doubletap_percentage, None, 0)
         dwell_regular = get_value(args.reels_watch_time, None, 6, its_time=True)
         if dwell_regular is None:
             dwell_regular = 6
@@ -944,67 +1913,192 @@ class PostsViewList:
         likes_limit_logged = False
         reel_likes_limit_logged = False
         reel_watch_limit_logged = False
+        extra_watch_logged = False
+        extra_watch_remaining = None
         reels_likes_limit = int(session_state.args.current_reels_likes_limit)
         reels_watches_limit = int(session_state.args.current_reels_watches_limit)
+        extra_watch_limit = int(
+            session_state.args.current_reels_watch_after_like_limit
+        )
+        if reels_watches_limit == 0:
+            logger.info("Reel watch limit is 0; skipping reels.")
+            self._exit_reel_viewer()
+            return True
         for _ in range(reels_count):
+            username = self._get_reel_author_username()
+            if not username:
+                logger.debug("Reel author not detected; cannot check interacted history.")
+            skip_like_for_user = False
+            if storage is not None and username and current_job not in (None, "feed"):
+                if storage.is_user_in_blacklist(username):
+                    logger.info(f"@{username} is in blacklist. Skip reel interaction.")
+                    skip_like_for_user = True
+                else:
+                    interacted, interacted_when = storage.check_user_was_interacted(
+                        username
+                    )
+                    if interacted:
+                        can_reinteract = storage.can_be_reinteract(
+                            interacted_when,
+                            get_value(args.can_reinteract_after, None, 0),
+                        )
+                        logger.info(
+                            f"@{username}: already interacted on {interacted_when:%Y/%m/%d %H:%M:%S}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                        )
+                        if not can_reinteract:
+                            skip_like_for_user = True
+            already_liked = _is_reel_liked(self.device)
+            if already_liked:
+                logger.info("Reel already liked; skipping like.")
+                skip_like_for_user = True
+                if storage is not None and username and session_state is not None:
+                    storage.add_interacted_user(
+                        username,
+                        session_id=session_state.id,
+                        liked=1,
+                        job_name=current_job,
+                        target=target,
+                    )
+                logger.info("Reel already liked; swiping immediately.")
+                UniversalActions(self.device)._swipe_points(
+                    direction=Direction.UP, delta_y=800
+                )
+                random_sleep(inf=0.1, sup=0.3, modulable=False)
+                if session_state is not None:
+                    session_state.totalWatched += 1
+                    session_state.totalReelWatched += 1
+                    if extra_watch_remaining is not None:
+                        extra_watch_remaining -= 1
+                        if extra_watch_remaining <= 0:
+                            logger.info(
+                                "Like limit reached; extra reels watched, exiting."
+                            )
+                            break
+                continue
             if (
                 reels_watches_limit > 0
                 and session_state.totalReelWatched >= reels_watches_limit
             ):
                 if not reel_watch_limit_logged:
-                    logger.info("Reel watch limit reached; stopping reels.")
+                    logger.info("Reel watch limit reached; stopping session.")
                     reel_watch_limit_logged = True
-                break
-            limits_reached, _, _ = session_state.check_limit(
-                limit_type=session_state.Limit.ALL
-            )
-            if limits_reached:
-                logger.info("Session limits reached while in reels; stopping reels.")
-                break
+                sessions = getattr(configs, "sessions", None)
+                if sessions is None:
+                    logger.warning("Sessions list unavailable; exiting reels viewer.")
+                    self._exit_reel_viewer()
+                    self.last_reel_handled = True
+                    return True
+                stop_bot(self.device, sessions, session_state)
+                self.last_reel_handled = True
+                return True
             is_ad = self._is_reel_ad_only()
             likes_limit = int(session_state.args.current_likes_limit)
-            global_likes_reached = likes_limit > 0 and session_state.totalLikes >= likes_limit
+            global_likes_reached = (
+                likes_limit > 0 and session_state.totalLikes >= likes_limit
+            )
             reel_likes_reached = (
-                reels_likes_limit > 0 and session_state.totalReelLikes >= reels_likes_limit
+                reels_likes_limit > 0
+                and session_state.totalReelLikes >= reels_likes_limit
             )
             likes_limit_reached = global_likes_reached or reel_likes_reached
-            if likes_limit_reached and not likes_limit_logged:
+            if global_likes_reached and not likes_limit_logged:
                 logger.info("Like limit reached; skipping reel likes.")
                 likes_limit_logged = True
             if reel_likes_reached and not reel_likes_limit_logged:
                 logger.info("Reel-like limit reached; skipping reel likes.")
                 reel_likes_limit_logged = True
+            if likes_limit_reached and extra_watch_remaining is None:
+                extra_watch_remaining = max(0, extra_watch_limit)
+                if extra_watch_remaining == 0:
+                    logger.info(
+                        "Like limit reached; extra watch disabled, stopping reels."
+                    )
+                    break
+                if not extra_watch_logged:
+                    logger.info(
+                        f"Like limit reached; watching {extra_watch_remaining} more reels before exiting."
+                    )
+                    extra_watch_logged = True
+
+            limits_reached, _, _ = session_state.check_limit(
+                limit_type=session_state.Limit.ALL
+            )
+            if limits_reached:
+                logger.info("Session limits reached while in reels; stopping session.")
+                sessions = getattr(configs, "sessions", None)
+                if sessions is None:
+                    logger.warning("Sessions list unavailable; exiting reels viewer.")
+                    self._exit_reel_viewer()
+                    self.last_reel_handled = True
+                    return True
+                stop_bot(self.device, sessions, session_state)
 
             if (
                 like_pct
                 and not likes_limit_reached
+                and not skip_like_for_user
                 and (args.reels_like_ads or not is_ad)
                 and randint(1, 100) <= like_pct
             ):
                 used_doubletap = _reel_like_use_double_tap(doubletap_pct)
+                liked = None
+                method = None
                 if used_doubletap and _double_tap_reel_media(self.device):
+                    random_sleep(inf=0.3, sup=0.7, modulable=False)
+                    liked = _is_reel_liked(self.device)
+                    if not liked:
+                        logger.info(
+                            "Double-tap did not confirm like; trying heart."
+                        )
+                        liked = _click_reel_like_button(self.device)
+                        if liked:
+                            method = "heart"
+                    else:
+                        method = "double-tap"
+                else:
+                    liked = _click_reel_like_button(self.device)
+                    if liked:
+                        method = "heart"
+                if liked:
                     session_state.totalLikes += 1
                     session_state.totalReelLikes += 1
-                    logger.info("Liked reel (double-tap).")
-                else:
-                    like_btn = self.device.find(
-                        resourceIdMatches=case_insensitive_re(ResourceID.LIKE_BUTTON)
-                    )
-                    if not like_btn.exists():
-                        like_btn = self.device.find(
-                            descriptionMatches=case_insensitive_re("like")
+                    logger.info(f"Liked reel ({method}).")
+                    if storage is not None and username and session_state is not None:
+                        storage.add_interacted_user(
+                            username,
+                            session_id=session_state.id,
+                            liked=1,
+                            job_name=current_job,
+                            target=target,
                         )
-                    if like_btn.exists(Timeout.SHORT):
-                        like_btn.click()
-                        UniversalActions.detect_block(self.device)
-                        session_state.totalLikes += 1
-                        session_state.totalReelLikes += 1
-                        logger.info("Liked reel (heart).")
+                elif liked is None:
+                    logger.warning("Reel like could not be confirmed.")
             # Human-ish dwell based on config
             stay_time = dwell_ads if is_ad else dwell_regular
             random_sleep(inf=max(1, stay_time - 1), sup=stay_time + 1, modulable=False)
             session_state.totalWatched += 1
             session_state.totalReelWatched += 1
+            if extra_watch_remaining is not None:
+                extra_watch_remaining -= 1
+                if extra_watch_remaining <= 0:
+                    logger.info(
+                        "Like limit reached; extra reels watched, exiting."
+                    )
+                    break
+            if (
+                reels_watches_limit > 0
+                and session_state.totalReelWatched >= reels_watches_limit
+            ):
+                logger.info("Reel watch limit reached; stopping session.")
+                sessions = getattr(configs, "sessions", None)
+                if sessions is None:
+                    logger.warning("Sessions list unavailable; exiting reels viewer.")
+                    self._exit_reel_viewer()
+                    self.last_reel_handled = True
+                    return True
+                stop_bot(self.device, sessions, session_state)
+                self.last_reel_handled = True
+                return True
             logger.info("Swiping to next reel.")
             UniversalActions(self.device)._swipe_points(
                 direction=Direction.UP, delta_y=800
@@ -1012,7 +2106,103 @@ class PostsViewList:
             # Post-swipe pause derived from configured watch time to stay human-like
             swipe_pause = min(max(0.5, stay_time * 0.3), 3)
             random_sleep(inf=swipe_pause * 0.8, sup=swipe_pause * 1.2, modulable=False)
+        limits_reached, _, _ = session_state.check_limit(
+            limit_type=session_state.Limit.ALL
+        )
+        if limits_reached:
+            logger.info("Session limits reached after reels; stopping session.")
+            sessions = getattr(configs, "sessions", None)
+            if sessions is None:
+                logger.warning("Sessions list unavailable; exiting reels viewer.")
+                self._exit_reel_viewer()
+                self.last_reel_handled = True
+                return True
+            stop_bot(self.device, sessions, session_state)
         logger.info("Returning from reels viewer to previous screen.")
+        self._exit_reel_viewer()
+        self.last_reel_handled = True
+        return True
+
+    def _handle_single_image_reel_as_post(
+        self,
+        session_state,
+        storage=None,
+        current_job: Optional[str] = None,
+        target: Optional[str] = None,
+    ) -> bool:
+        logger.info("Single-image reel detected; treating as photo post.")
+        username = self._get_reel_author_username()
+        if not username:
+            logger.debug("Reel author not detected; cannot check interacted history.")
+        if storage is not None and username:
+            if storage.is_user_in_blacklist(username):
+                logger.info(f"@{username} is in blacklist. Skip.")
+                self._exit_reel_viewer()
+                return True
+            if current_job not in (None, "feed"):
+                interacted, interacted_when = storage.check_user_was_interacted(
+                    username
+                )
+                if interacted:
+                    can_reinteract = storage.can_be_reinteract(
+                        interacted_when, get_value(args.can_reinteract_after, None, 0)
+                    )
+                    logger.info(
+                        f"@{username}: already interacted on {interacted_when:%Y/%m/%d %H:%M:%S}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                    )
+                    if not can_reinteract:
+                        self._exit_reel_viewer()
+                        return True
+        # If already liked, skip any interaction logic and record interaction history.
+        liked_state = _is_reel_liked(self.device)
+        if liked_state:
+            logger.info("Single-image reel already liked; skipping interaction.")
+            if storage is not None and username and session_state is not None:
+                storage.add_interacted_user(
+                    username,
+                    session_id=session_state.id,
+                    liked=1,
+                    job_name=current_job,
+                    target=target,
+                )
+            self._exit_reel_viewer()
+            return True
+        watch_time = get_value(args.watch_photo_time, None, 0, its_time=True)
+        if watch_time is None:
+            watch_time = 0
+        if watch_time > 0:
+            logger.info(f"Watching photo for {watch_time}s.")
+            sleep(watch_time)
+
+        interact_pct = get_value(args.interact_percentage, None, 0)
+        if not random_choice(interact_pct):
+            logger.info("Skip interaction on single-image reel (chance).")
+            self._exit_reel_viewer()
+            return True
+
+        like_pct = get_value(args.likes_percentage, None, 0)
+        likes_limit = 0
+        if session_state is not None:
+            likes_limit = int(session_state.args.current_likes_limit)
+        likes_limit_reached = False
+        if session_state is not None and likes_limit > 0:
+            likes_limit_reached = session_state.totalLikes >= likes_limit
+        if like_pct and not likes_limit_reached and randint(1, 100) <= like_pct:
+            liked = _click_reel_like_button(self.device)
+            if liked:
+                logger.info("Liked single-image reel as photo.")
+                if session_state is not None:
+                    session_state.totalLikes += 1
+                if storage is not None and username and session_state is not None:
+                    storage.add_interacted_user(
+                        username,
+                        session_id=session_state.id,
+                        liked=1,
+                        job_name=current_job,
+                        target=target,
+                    )
+            elif liked is None:
+                logger.warning("Single-image reel like could not be confirmed.")
         self._exit_reel_viewer()
         return True
 
@@ -1276,6 +2466,21 @@ class PostsViewList:
         self.has_tags = tags_icon.exists()
         return self.has_tags
 
+    @staticmethod
+    def _desc_is_sponsored(desc: str) -> bool:
+        if not desc:
+            return False
+        sponsored_txts = [
+            "sponsored",
+            "gesponsert",
+            "pubblicité",
+            "publicidad",
+            "sponsorisé",
+            "advertisement",
+        ]
+        pattern = r"\b(" + "|".join(map(re.escape, sponsored_txts)) + r")\b"
+        return re.search(pattern, desc, re.IGNORECASE) is not None
+
     def _check_if_last_post(
         self, last_description, current_job
     ) -> Tuple[bool, str, str, bool, bool, bool]:
@@ -1336,6 +2541,23 @@ class PostsViewList:
                         )
                     logger.info(
                         "This post has the same description and author as the last one."
+                    )
+                    return True, new_description, username, is_ad, is_hashtag, has_tags
+            if not post_description.exists():
+                media, content_desc = self._get_media_container()
+                if content_desc:
+                    new_description = content_desc.upper()
+                    if new_description != last_description:
+                        return (
+                            False,
+                            new_description,
+                            username,
+                            is_ad,
+                            is_hashtag,
+                            has_tags,
+                        )
+                    logger.info(
+                        "This post has the same media description and author as the last one."
                     )
                     return True, new_description, username, is_ad, is_hashtag, has_tags
             if post_description.exists():
@@ -1424,6 +2646,14 @@ class PostsViewList:
         """returns a tuple[var, bool, bool]"""
         is_ad = False
         is_hashtag = False
+        if username is None and mode == Owner.GET_NAME and current_job == "feed":
+            _, content_desc = self._get_media_container()
+            if content_desc:
+                media_username = _parse_username_from_tile_desc(content_desc)
+                if media_username:
+                    is_ad = self._desc_is_sponsored(content_desc)
+                    is_hashtag = media_username.startswith("#")
+                    return media_username, is_ad, is_hashtag
         if username is None:
             post_owner_obj = self.device.find(
                 resourceIdMatches=ResourceID.ROW_FEED_PHOTO_PROFILE_NAME
@@ -1661,6 +2891,15 @@ class PostsViewList:
             if ad_badge.exists(Timeout.TINY):
                 logger.debug("Ad badge under username detected, mark as AD.")
                 is_ad = True
+        if not is_ad:
+            ad_label = post_owner_obj.sibling(resourceId=ResourceID.SECONDARY_LABEL)
+            if ad_label.exists(Timeout.TINY):
+                label_text = (
+                    ad_label.get_text(error=False) or ad_label.get_desc() or ""
+                ).strip()
+                if label_text and self._desc_is_sponsored(label_text):
+                    logger.debug("Secondary label indicates ad, mark as AD.")
+                    is_ad = True
         if is_hashtag:
             owner_name = owner_name.split("•")[0].strip()
 
@@ -2402,6 +3641,16 @@ class ProfileView(ActionBarView):
         action_bar = self._getActionBarTitleBtn(watching_stories)
         if action_bar is not None:
             return action_bar.get_text(error=not watching_stories).strip()
+        # If we're not on a profile screen (e.g., search results), avoid noisy errors.
+        try:
+            if self.device.find(
+                resourceIdMatches=case_insensitive_re(
+                    f"{ResourceID.ACTION_BAR_SEARCH_EDIT_TEXT}|{ResourceID.SEARCH_TAB_BAR_LAYOUT}"
+                )
+            ).exists(Timeout.TINY):
+                return None
+        except Exception:
+            pass
         # Fallback to profile header username/full name
         header_username = self.device.find(
             resourceIdMatches=case_insensitive_re(
